@@ -199,7 +199,7 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 
 	prKey := job.PRKey()
 
-	if job.Event == store.EventReopened {
+	if job.Event == store.EventReopened && job.Attempts == 1 {
 		if err := w.store.ResetPRState(ctx, prKey); err != nil {
 			return err
 		}
