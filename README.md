@@ -64,11 +64,27 @@ Point a GitHub webhook at `https://your-host/webhook/github` (content type
 requests*), or a GitLab one at `/webhook/gitlab` (secret token =
 `PRW_GITLAB_WEBHOOK_SECRET`, trigger: *Merge request events*).
 
-For local testing, tunnel the port and replay deliveries from the forge UI:
+For local testing without exposing a port, replay a real delivery against the
+running worker. The payload is fetched from the live API and signed exactly as
+GitHub signs it, so the verification path is exercised rather than bypassed:
 
 ```bash
-gh webhook forward --repo=<owner>/<repo> --events=pull_request \
-  --url=http://localhost:8080/webhook/github
+PRW_GITHUB_WEBHOOK_SECRET=... scripts/deliver.sh owner/repo 7 opened
+PRW_GITHUB_WEBHOOK_SECRET=... scripts/deliver.sh owner/repo 7 synchronize
+```
+
+With a public URL, `gh webhook forward --repo=owner/repo --events=pull_request
+--url=http://localhost:8080/webhook/github` works too.
+
+### Engine environment
+
+The worker passes its own environment to the engine, so anything the CLI reads
+is configured on the worker's process. In particular, an older Claude Code
+install may be pinned to a retired model and fail every invocation with
+`404 not_found_error: model: ...`; set the model on the worker:
+
+```bash
+ANTHROPIC_MODEL=claude-sonnet-5 ./bin/pr-review-worker
 ```
 
 ## Commands

@@ -638,3 +638,52 @@ func TestNotifyWakesAnIdleWorker(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestATransientPostFailureLeavesTheFindingPostableNextPass(t *testing.T) {
+	// Review feedback (PR #1): recording the fingerprint before the API call
+	// meant a network blip silently suppressed the finding forever.
+	engine := &scriptedEngine{results: []reviewer.Result{
+		{Summary: "p1", Findings: []reviewer.Finding{finding("a.go", "nil deref", reviewer.SeverityMajor)}},
+		{Summary: "p2", Findings: []reviewer.Finding{finding("a.go", "nil deref", reviewer.SeverityMajor)}},
+	}}
+
+	h := newHarness(t, worker.Config{}, engine)
+	h.prov.inlineErr = errors.New("502 bad gateway")
+
+	h.enqueue(t, "d1", "sha1", store.EventOpened)
+	h.runOnce(t)
+
+	if len(h.prov.inline) != 0 {
+		t.Fatalf("inline = %+v, want none posted", h.prov.inline)
+	}
+
+	// Second pass, provider healthy again: the same finding must be posted.
+	h.prov.inlineErr = nil
+	h.prov.pr.HeadSHA = "sha2"
+	h.enqueue(t, "d2", "sha2", store.EventSynchronize)
+	h.runOnce(t)
+
+	if len(h.prov.inline) != 1 || h.prov.inline[0].Path != "a.go" {
+		t.Fatalf("inline = %+v; a failed post permanently suppressed the finding", h.prov.inline)
+	}
+}
+
+func TestASuccessfulPostIsNotRepeatedNextPass(t *testing.T) {
+	engine := &scriptedEngine{results: []reviewer.Result{
+		{Summary: "p1", Findings: []reviewer.Finding{finding("a.go", "nil deref", reviewer.SeverityMajor)}},
+		{Summary: "p2", Findings: []reviewer.Finding{finding("a.go", "nil deref", reviewer.SeverityMajor)}},
+	}}
+
+	h := newHarness(t, worker.Config{}, engine)
+
+	h.enqueue(t, "d1", "sha1", store.EventOpened)
+	h.runOnce(t)
+
+	h.prov.pr.HeadSHA = "sha2"
+	h.enqueue(t, "d2", "sha2", store.EventSynchronize)
+	h.runOnce(t)
+
+	if len(h.prov.inline) != 1 {
+		t.Fatalf("inline = %d comments, want the finding posted exactly once", len(h.prov.inline))
+	}
+}

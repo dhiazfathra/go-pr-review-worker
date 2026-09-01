@@ -317,32 +317,41 @@ func (s *Store) SavePRState(ctx context.Context, prKey string, st PRState) error
 	return nil
 }
 
-// ClaimFingerprints returns the subset of fingerprints never posted for this PR
-// and records them as posted. Callers get at-most-once comment posting even
-// across restarts and across the second review cycle.
-func (s *Store) ClaimFingerprints(ctx context.Context, prKey string, fingerprints []string) ([]string, error) {
+// UnseenFingerprints returns the subset of fingerprints never posted for this
+// PR. It records nothing: a fingerprint must only be marked posted once the
+// provider has actually accepted the comment, otherwise a transient API failure
+// would suppress that finding forever (RecordFingerprint does the marking).
+func (s *Store) UnseenFingerprints(ctx context.Context, prKey string, fingerprints []string) ([]string, error) {
 	unseen := make([]string, 0, len(fingerprints))
 
 	for _, fp := range fingerprints {
-		res, err := s.db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO posted_comments (pr_key, fingerprint, created_at) VALUES (?, ?, ?)`,
-			prKey,
-			fp,
-			now(),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("recording comment fingerprint for %q: %w", prKey, err)
-		}
+		var exists int
 
-		n, err := res.RowsAffected()
-		if err != nil {
-			return nil, fmt.Errorf("counting recorded fingerprints: %w", err)
-		}
+		row := s.db.QueryRowContext(ctx,
+			`SELECT 1 FROM posted_comments WHERE pr_key = ? AND fingerprint = ?`, prKey, fp)
 
-		if n > 0 {
+		switch err := row.Scan(&exists); {
+		case errors.Is(err, sql.ErrNoRows):
 			unseen = append(unseen, fp)
+		case err != nil:
+			return nil, fmt.Errorf("reading comment fingerprints for %q: %w", prKey, err)
 		}
 	}
 
 	return unseen, nil
+}
+
+// RecordFingerprint marks a fingerprint as posted for this PR. Safe to call
+// twice; the primary key absorbs the repeat.
+func (s *Store) RecordFingerprint(ctx context.Context, prKey, fingerprint string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO posted_comments (pr_key, fingerprint, created_at) VALUES (?, ?, ?)`,
+		prKey,
+		fingerprint,
+		now(),
+	); err != nil {
+		return fmt.Errorf("recording comment fingerprint for %q: %w", prKey, err)
+	}
+
+	return nil
 }

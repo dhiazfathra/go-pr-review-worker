@@ -179,36 +179,56 @@ func TestPRStateRoundTrip(t *testing.T) {
 	}
 }
 
-func TestClaimFingerprintsReturnsOnlyUnseen(t *testing.T) {
+func TestUnseenFingerprintsOnlyHidesRecordedOnes(t *testing.T) {
 	st := open(t)
 	ctx := context.Background()
 
-	first, err := st.ClaimFingerprints(ctx, "pr", []string{"a", "b"})
+	first, err := st.UnseenFingerprints(ctx, "pr", []string{"a", "b"})
 	if err != nil {
-		t.Fatalf("ClaimFingerprints: %v", err)
+		t.Fatalf("UnseenFingerprints: %v", err)
 	}
 
 	if len(first) != 2 {
-		t.Fatalf("first claim = %v, want 2 entries", first)
+		t.Fatalf("first read = %v, want 2 entries", first)
 	}
 
-	second, err := st.ClaimFingerprints(ctx, "pr", []string{"a", "b", "c"})
+	// Reading must not record: an unposted comment has to stay eligible, or a
+	// failed post would suppress the finding forever.
+	again, err := st.UnseenFingerprints(ctx, "pr", []string{"a", "b"})
 	if err != nil {
-		t.Fatalf("ClaimFingerprints: %v", err)
+		t.Fatalf("UnseenFingerprints: %v", err)
 	}
 
-	if len(second) != 1 || second[0] != "c" {
-		t.Fatalf("second claim = %v, want [c]", second)
+	if len(again) != 2 {
+		t.Fatalf("second read = %v; reading marked them posted", again)
+	}
+
+	if err := st.RecordFingerprint(ctx, "pr", "a"); err != nil {
+		t.Fatalf("RecordFingerprint: %v", err)
+	}
+
+	// Recording twice is harmless.
+	if err := st.RecordFingerprint(ctx, "pr", "a"); err != nil {
+		t.Fatalf("RecordFingerprint repeat: %v", err)
+	}
+
+	after, err := st.UnseenFingerprints(ctx, "pr", []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("UnseenFingerprints: %v", err)
+	}
+
+	if len(after) != 2 || after[0] != "b" || after[1] != "c" {
+		t.Fatalf("after recording = %v, want [b c]", after)
 	}
 
 	// A different PR must not inherit the first PR's dedup state.
-	other, err := st.ClaimFingerprints(ctx, "other", []string{"a"})
+	other, err := st.UnseenFingerprints(ctx, "other", []string{"a"})
 	if err != nil {
-		t.Fatalf("ClaimFingerprints: %v", err)
+		t.Fatalf("UnseenFingerprints: %v", err)
 	}
 
 	if len(other) != 1 {
-		t.Fatalf("other PR claim = %v, want [a]", other)
+		t.Fatalf("other PR = %v, want [a]", other)
 	}
 }
 
@@ -236,8 +256,12 @@ func TestClosedStoreReportsErrors(t *testing.T) {
 		t.Fatal("SavePRState on closed store: want error")
 	}
 
-	if _, err := st.ClaimFingerprints(ctx, "pr", []string{"a"}); err == nil {
-		t.Fatal("ClaimFingerprints on closed store: want error")
+	if _, err := st.UnseenFingerprints(ctx, "pr", []string{"a"}); err == nil {
+		t.Fatal("UnseenFingerprints on closed store: want error")
+	}
+
+	if err := st.RecordFingerprint(ctx, "pr", "a"); err == nil {
+		t.Fatal("RecordFingerprint on closed store: want error")
 	}
 
 	if err := st.Finish(ctx, 1, store.StateDone, errors.New("x")); err == nil {

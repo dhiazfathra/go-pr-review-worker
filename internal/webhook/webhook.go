@@ -54,9 +54,19 @@ type (
 // serve is the shared intake path: read, verify, parse, enqueue.
 func (h *Handler) serve(parse jobParser, verify verifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+		// Read one byte past the cap: a truncated body would fail HMAC
+		// verification and be reported as a bad signature, which sends an
+		// operator hunting for a secret mismatch that does not exist.
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 		if err != nil {
 			http.Error(w, "cannot read body", http.StatusBadRequest)
+
+			return
+		}
+
+		if len(body) > maxBodyBytes {
+			h.Logger.Warn("oversized webhook delivery", "path", r.URL.Path, "limit", maxBodyBytes)
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 
 			return
 		}

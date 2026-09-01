@@ -369,3 +369,22 @@ func TestFullNotifyChannelDoesNotBlock(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 }
+
+func TestOversizedBodyIsRejectedAsTooLargeNotAsABadSignature(t *testing.T) {
+	// Review feedback (PR #1): truncating before HMAC made a size problem look
+	// like a secret mismatch, sending operators after the wrong cause.
+	mux, st, _ := harness(t)
+
+	body := `{"action":"opened","pull_request":{"number":7,"head":{"sha":"s"},` +
+		`"base":{"sha":"b"}},"repository":{"full_name":"acme/app"},"pad":"` +
+		strings.Repeat("x", 3<<20) + `"}`
+
+	rec := postGitHub(t, mux, "pull_request", body, sign(body))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+
+	if n, _ := st.PendingCount(t.Context()); n != 0 {
+		t.Fatalf("pending = %d, want 0", n)
+	}
+}

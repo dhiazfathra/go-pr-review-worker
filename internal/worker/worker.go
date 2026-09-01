@@ -340,7 +340,7 @@ func (w *Worker) postFindings(
 		fingerprints = append(fingerprints, fp)
 	}
 
-	fresh, err := w.store.ClaimFingerprints(ctx, job.PRKey(), fingerprints)
+	fresh, err := w.store.UnseenFingerprints(ctx, job.PRKey(), fingerprints)
 	if err != nil {
 		return nil, err
 	}
@@ -358,10 +358,16 @@ func (w *Worker) postFindings(
 		if err != nil {
 			// A line outside the diff is rejected by the forge. That is a bad
 			// citation from the engine, not a worker failure: the finding
-			// still reaches the reviewer through the summary.
+			// still reaches the reviewer through the summary. The fingerprint
+			// stays unrecorded, so a transient failure is retried next pass
+			// rather than suppressing the finding forever.
 			log.Warn("inline comment rejected", "file", f.File, "line", f.Line, "error", err)
 
 			continue
+		}
+
+		if err := w.store.RecordFingerprint(ctx, job.PRKey(), fp); err != nil {
+			return nil, err
 		}
 
 		posted = append(posted, f)

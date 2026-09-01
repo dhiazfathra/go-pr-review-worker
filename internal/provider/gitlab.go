@@ -7,12 +7,19 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 // GitLab talks to the GitLab REST API v4. Merge requests are addressed by
 // project path (URL-encoded) and iid, matching the webhook payload.
 type GitLab struct {
 	c *httpClient
+
+	// refs memoises the diff-refs triple per merge request revision. Every
+	// inline comment needs it, and without the cache a pass with N findings
+	// makes N extra API calls for an answer that cannot change mid-pass.
+	refsMu sync.Mutex
+	refs   map[string]gitlabDiffRefs
 }
 
 // NewGitLab returns a GitLab provider. baseURL is the API root, e.g.
@@ -26,6 +33,7 @@ func NewGitLab(baseURL, token string) *GitLab {
 		c: newHTTPClient(baseURL, token, func(t string) (string, string) {
 			return "PRIVATE-TOKEN", t
 		}),
+		refs: map[string]gitlabDiffRefs{},
 	}
 }
 
@@ -162,8 +170,33 @@ func (g *GitLab) CompareDiff(ctx context.Context, repo, from, to string) (string
 	return unified(payload.Diffs), nil
 }
 
+// diffRefs returns the position triple for a merge request at headSHA, reading
+// it from the API at most once per revision.
+func (g *GitLab) diffRefs(ctx context.Context, repo string, iid int, headSHA string) (gitlabDiffRefs, error) {
+	key := fmt.Sprintf("%s#%d@%s", repo, iid, headSHA)
+
+	g.refsMu.Lock()
+	cached, ok := g.refs[key]
+	g.refsMu.Unlock()
+
+	if ok {
+		return cached, nil
+	}
+
+	mr, err := g.mergeRequest(ctx, repo, iid)
+	if err != nil {
+		return gitlabDiffRefs{}, err
+	}
+
+	g.refsMu.Lock()
+	g.refs[key] = mr.DiffRefs
+	g.refsMu.Unlock()
+
+	return mr.DiffRefs, nil
+}
+
 // PostInline implements Provider. GitLab needs the full diff refs triple to
-// anchor a discussion, so the MR is re-read to get them.
+// anchor a discussion; they are fetched once per revision and cached.
 func (g *GitLab) PostInline(
 	ctx context.Context,
 	repo string,
@@ -171,7 +204,7 @@ func (g *GitLab) PostInline(
 	headSHA string,
 	c InlineComment,
 ) error {
-	mr, err := g.mergeRequest(ctx, repo, number)
+	refs, err := g.diffRefs(ctx, repo, number, headSHA)
 	if err != nil {
 		return err
 	}
@@ -179,8 +212,8 @@ func (g *GitLab) PostInline(
 	form := url.Values{}
 	form.Set("body", c.Body)
 	form.Set("position[position_type]", "text")
-	form.Set("position[base_sha]", mr.DiffRefs.BaseSHA)
-	form.Set("position[start_sha]", mr.DiffRefs.StartSHA)
+	form.Set("position[base_sha]", refs.BaseSHA)
+	form.Set("position[start_sha]", refs.StartSHA)
 	form.Set("position[head_sha]", headSHA)
 	form.Set("position[new_path]", c.Path)
 	form.Set("position[old_path]", c.Path)

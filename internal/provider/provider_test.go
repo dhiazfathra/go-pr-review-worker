@@ -399,3 +399,60 @@ func TestInvalidMethodOrURLIsReported(t *testing.T) {
 		t.Fatal("want request build error")
 	}
 }
+
+func TestGitLabInlineFetchesDiffRefsOncePerRevision(t *testing.T) {
+	// Review feedback (PR #1): the merge request was re-read for every finding,
+	// multiplying API calls and rate-limit exposure by the comment count.
+	srv, log := server(t, map[string]string{
+		"GET /projects/grp%2Fproj/merge_requests/4": `{"diff_refs":
+			{"base_sha":"b1","head_sha":"h1","start_sha":"s1"}}`,
+		"POST /projects/grp%2Fproj/merge_requests/4/discussions": `{"id":"x"}`,
+	})
+
+	gl := provider.NewGitLab(srv.URL, "tok")
+
+	for i := range 3 {
+		err := gl.PostInline(context.Background(), "grp/proj", 4, "h2", provider.InlineComment{
+			Path: "a.go",
+			Line: i + 1,
+			Body: "problem",
+		})
+		if err != nil {
+			t.Fatalf("PostInline %d: %v", i, err)
+		}
+	}
+
+	gets := 0
+
+	for _, r := range *log {
+		if r.method == "GET" {
+			gets++
+		}
+	}
+
+	if gets != 1 {
+		t.Fatalf("merge request fetched %d times for 3 comments, want 1", gets)
+	}
+
+	// A new revision must invalidate the memo, or comments would be anchored
+	// against stale refs after a push.
+	if err := gl.PostInline(context.Background(), "grp/proj", 4, "h3", provider.InlineComment{
+		Path: "a.go",
+		Line: 1,
+		Body: "problem",
+	}); err != nil {
+		t.Fatalf("PostInline after push: %v", err)
+	}
+
+	gets = 0
+
+	for _, r := range *log {
+		if r.method == "GET" {
+			gets++
+		}
+	}
+
+	if gets != 2 {
+		t.Fatalf("GETs = %d after a new head sha, want 2", gets)
+	}
+}
