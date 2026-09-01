@@ -13,12 +13,15 @@ exercised rather than bypassed.
 
 ```bash
 PRW_GITHUB_TOKEN="$(gh auth token)" \
-PRW_GITHUB_WEBHOOK_SECRET=live-secret-abc123 \
+PRW_GITHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
 PRW_DB=/tmp/prw-live/prw.db \
 PRW_ADDR=127.0.0.1:8099 \
 PRW_ENGINE_TIMEOUT=15m \
 ANTHROPIC_MODEL=claude-sonnet-5 \
 ./bin/pr-review-worker > /tmp/prw-live/worker.log 2>&1 &
+
+# PRW_GITHUB_WEBHOOK_SECRET here is a throwaway value for this local run: no
+# webhook was ever registered on the repository with it, so it grants nothing.
 
 curl -s http://127.0.0.1:8099/healthz
 ```
@@ -40,7 +43,7 @@ environment note in the README now covers.
 ## Pass 1 — `pull_request: opened`
 
 ```bash
-PRW_GITHUB_WEBHOOK_SECRET=live-secret-abc123 \
+PRW_GITHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
   scripts/deliver.sh dhiazfathra/go-pr-review-worker 1 opened
 ```
 
@@ -104,7 +107,7 @@ regression test that fails against the old behaviour.
 
 ```bash
 git push                       # a481309: the fixes for pass 1's findings
-PRW_GITHUB_WEBHOOK_SECRET=live-secret-abc123 \
+PRW_GITHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
   scripts/deliver.sh dhiazfathra/go-pr-review-worker 1 synchronize
 ```
 
