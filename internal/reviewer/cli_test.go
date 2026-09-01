@@ -78,14 +78,16 @@ echo "{\"summary\":\"$(env | sort | tr '\n' ';')\",\"findings\":[]}"`, 10*time.S
 		t.Fatalf("Review: %v", err)
 	}
 
+	// The environment is only ever asserted against, never echoed: printing it
+	// on failure would copy whatever credentials it carries into the test log.
 	for _, want := range []string{"USER=prw", "LOGNAME=prw"} {
 		if !strings.Contains(res.Summary, want) {
-			t.Errorf("engine env is missing %s; keyring auth would fail:\n%s", want, res.Summary)
+			t.Errorf("engine env is missing %s; keyring auth would fail", want)
 		}
 	}
 
 	if strings.Contains(res.Summary, "ghp-must-not-leak") {
-		t.Errorf("forge token reached the engine:\n%s", res.Summary)
+		t.Error("the forge token reached the engine environment")
 	}
 }
 
@@ -162,6 +164,33 @@ sleep 30`
 	// SIGTERM grace period is 2s; anything near 30s means the kill failed.
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("took %s: the hung engine was not killed", elapsed)
+	}
+}
+
+// A shutdown and an overrunning engine both cancel the invocation, but they are
+// different incidents: reporting the first as a timeout sends someone hunting a
+// slow engine that was behaving.
+func TestCLIParentCancellationIsNotReportedAsATimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	// The timeout is long enough that only the parent's cancellation can end
+	// this invocation.
+	_, err := newCLI(t, "sleep 30", time.Hour).Review(ctx, Request{Diff: "d"})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("err = %v, want it reported as a cancellation", err)
+	}
+
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("err = %v, must not blame a timeout for the parent's cancellation", err)
 	}
 }
 

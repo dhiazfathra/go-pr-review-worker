@@ -1,6 +1,10 @@
 # /etc/systemd/system/pr-review-worker.service
 #
-#   useradd --system --home /var/lib/pr-review-worker --shell /usr/sbin/nologin pr-review-worker
+#   useradd --system --user-group --home /var/lib/pr-review-worker --shell /usr/sbin/nologin pr-review-worker
+#
+# --user-group is not optional: without it, whether the pr-review-worker group
+# is created at all depends on USERGROUPS_ENAB in /etc/login.defs, and if it is
+# not, systemd cannot resolve Group= below and the unit refuses to start.
 #   install -m 0755 pr-review-worker /usr/local/bin/
 #   install -m 0600 prw.env /etc/pr-review-worker.env
 #   systemctl enable --now pr-review-worker
@@ -39,6 +43,10 @@ TimeoutStopSec=30s
 MemoryMax=3G
 
 NoNewPrivileges=true
+# PrivateTmp gives the unit its own /tmp and /var/tmp, discarded on stop, so the
+# review CLI's scratch files never touch the host's. ProtectSystem=strict leaves
+# the rest of the filesystem read-only; the only writable persistent path is
+# StateDirectory, which is where the SQLite file lives.
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true

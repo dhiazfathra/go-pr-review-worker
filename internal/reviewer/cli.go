@@ -133,6 +133,8 @@ func (c CLI) run(ctx context.Context, prompt string) (string, string, error) {
 		timeout = defaultTimeout
 	}
 
+	parent := ctx
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -163,6 +165,15 @@ func (c CLI) run(ctx context.Context, prompt string) (string, string, error) {
 	case <-ctx.Done():
 		if !c.kill(cmd, done) {
 			<-done // reap, the group is already signalled
+		}
+
+		// The worker shutting down and the engine overrunning its budget both
+		// land here, and they are not the same incident: one is expected, the
+		// other is the engine misbehaving. Reporting the parent's cancellation
+		// as a timeout would send someone hunting a slow engine that was fine.
+		if parentErr := parent.Err(); parentErr != nil {
+			return stdout.String(), stderr.String(),
+				fmt.Errorf("%s cancelled: %w", c.Binary, parentErr)
 		}
 
 		return stdout.String(), stderr.String(),

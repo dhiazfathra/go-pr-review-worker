@@ -57,9 +57,10 @@ type Finding struct {
 
 // Fingerprint identifies a finding for dedup across review cycles. The body is
 // deliberately excluded: the same issue reworded must not be posted twice. The
-// separator is NUL, not "|", because a file path or title cannot legally
-// contain a NUL byte but could contain "|" — a "|"-joined ("a|b", "c") and
-// ("a", "b|c") would otherwise fingerprint identically.
+// separator is NUL, not "|", because a file path or title could contain "|" —
+// a "|"-joined ("a|b", "c") and ("a", "b|c") would otherwise fingerprint
+// identically. The join is injective only because parseResult drops any
+// finding whose file or title contains a NUL of its own.
 func (f Finding) Fingerprint() string {
 	sum := sha256.Sum256([]byte(strings.ToLower(f.File + "\x00" + f.Title)))
 
@@ -155,6 +156,13 @@ func parseResult(out string) (Result, error) {
 	for _, f := range res.Findings {
 		if f.File == "" || f.Title == "" || f.Line <= 0 {
 			continue // unanchorable, would post as a comment on nothing
+		}
+
+		// JSON can carry a literal NUL as a \u0000 escape, which would break the
+		// injectivity the NUL-joined fingerprint relies on and let one finding
+		// silently displace another. No real path or title contains one.
+		if strings.ContainsRune(f.File, 0) || strings.ContainsRune(f.Title, 0) {
+			continue
 		}
 
 		if _, ok := severityRank[f.Severity]; !ok {

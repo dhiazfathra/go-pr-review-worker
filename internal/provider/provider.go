@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -56,11 +57,39 @@ type httpClient struct {
 
 func newHTTPClient(base, token string, authHeader func(string) (string, string)) *httpClient {
 	return &httpClient{
-		base:       strings.TrimRight(base, "/"),
-		token:      token,
-		hc:         &http.Client{Timeout: 30 * time.Second},
+		base:  strings.TrimRight(base, "/"),
+		token: token,
+		hc: &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: refuseInsecureRedirect,
+		},
 		authHeader: authHeader,
 	}
+}
+
+// refuseInsecureRedirect stops a redirect that would downgrade https to http.
+// Every request carries a forge token, and net/http only strips sensitive
+// headers when the redirect crosses to a different domain — a same-host
+// https-to-http hop keeps the Authorization header and would put the token on
+// the wire in cleartext.
+func refuseInsecureRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+
+	if req.URL.Scheme == "https" {
+		return nil
+	}
+
+	for _, prev := range via {
+		if prev.URL.Scheme == "https" {
+			return fmt.Errorf(
+				"refusing redirect from https to %s://%s: it would send the forge token in cleartext",
+				req.URL.Scheme, req.URL.Host)
+		}
+	}
+
+	return nil
 }
 
 // do performs a request and returns the body, failing on any non-2xx status.

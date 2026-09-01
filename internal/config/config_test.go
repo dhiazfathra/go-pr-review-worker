@@ -21,6 +21,7 @@ var prwVars = []string{
 	"PRW_ENGINE_TIMEOUT", "PRW_MAX_CYCLES", "PRW_MAX_ATTEMPTS", "PRW_MAX_COMMENTS",
 	"PRW_MAX_FINDINGS", "PRW_MIN_SEVERITY", "PRW_RETRY_DELAY", "PRW_POLL_INTERVAL",
 	"PRW_ANNOUNCE_BUDGET_EXHAUSTED", "PRW_LOG_LEVEL",
+	"PRW_ALLOW_INSECURE_LOOPBACK",
 }
 
 func clearEnv(t *testing.T) {
@@ -45,6 +46,7 @@ func TestLoadRequiresAtLeastOneProvider(t *testing.T) {
 }
 
 func TestLoadDefaults(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("PRW_GITHUB_TOKEN", "tok")
 	t.Setenv("PRW_GITHUB_WEBHOOK_SECRET", "sec")
 
@@ -83,6 +85,7 @@ func TestLoadDefaults(t *testing.T) {
 }
 
 func TestLoadOverrides(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("PRW_GITLAB_TOKEN", "tok")
 	t.Setenv("PRW_GITLAB_WEBHOOK_SECRET", "sec")
 	t.Setenv("PRW_ADDR", ":9000")
@@ -119,6 +122,7 @@ func TestLoadOverrides(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownSeverity(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("PRW_GITHUB_TOKEN", "tok")
 	t.Setenv("PRW_GITHUB_WEBHOOK_SECRET", "sec")
 	t.Setenv("PRW_MIN_SEVERITY", "whatever")
@@ -129,6 +133,7 @@ func TestLoadRejectsUnknownSeverity(t *testing.T) {
 }
 
 func TestUnparsableNumericValuesFallBackToDefaults(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("PRW_GITHUB_TOKEN", "tok")
 	t.Setenv("PRW_GITHUB_WEBHOOK_SECRET", "sec")
 	t.Setenv("PRW_MAX_CYCLES", "not-a-number")
@@ -146,10 +151,58 @@ func TestUnparsableNumericValuesFallBackToDefaults(t *testing.T) {
 }
 
 func TestPartialCredentialsAreNotEnabled(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("PRW_GITHUB_TOKEN", "tok") // no webhook secret
 	t.Setenv("PRW_GITLAB_WEBHOOK_SECRET", "sec")
 
 	if _, err := config.Load(); err == nil {
 		t.Fatal("want error: a token without a webhook secret cannot verify deliveries")
+	}
+}
+
+// Every request to the forge carries a token, so the endpoint's scheme decides
+// whether that token can end up on the wire in cleartext.
+func TestForgeAPIEndpointMustNotExposeTheToken(t *testing.T) {
+	cases := []struct {
+		name, api string
+		loopback  string // PRW_ALLOW_INSECURE_LOOPBACK
+		wantErr   bool
+	}{
+		{name: "https", api: "https://api.github.com"},
+		{name: "https with port", api: "https://ghe.example.com:8443/api/v3"},
+
+		{name: "plaintext", api: "http://api.example.com", wantErr: true},
+		{name: "plaintext loopback without opt-in", api: "http://127.0.0.1:9000", wantErr: true},
+		{name: "plaintext loopback with opt-in", api: "http://127.0.0.1:9000", loopback: "true"},
+		{name: "localhost with opt-in", api: "http://localhost:9000", loopback: "true"},
+		// The opt-in covers loopback only; it must not wave through a real host.
+		{name: "opt-in does not allow a remote host", api: "http://evil.example.com", loopback: "true", wantErr: true},
+
+		// url.Parse accepts these with the right scheme and no host at all.
+		{name: "https with no host", api: "https:forge.example", wantErr: true},
+		{name: "bare https scheme", api: "https:", wantErr: true},
+		{name: "https empty authority", api: "https:///api/v3", wantErr: true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("PRW_GITHUB_TOKEN", "tok")
+			t.Setenv("PRW_GITHUB_WEBHOOK_SECRET", "sec")
+			t.Setenv("PRW_GITHUB_API", c.api)
+
+			if c.loopback != "" {
+				t.Setenv("PRW_ALLOW_INSECURE_LOOPBACK", c.loopback)
+			}
+
+			_, err := config.Load()
+			if c.wantErr && err == nil {
+				t.Fatalf("PRW_GITHUB_API=%q was accepted; the forge token would travel in cleartext", c.api)
+			}
+
+			if !c.wantErr && err != nil {
+				t.Fatalf("PRW_GITHUB_API=%q rejected: %v", c.api, err)
+			}
+		})
 	}
 }

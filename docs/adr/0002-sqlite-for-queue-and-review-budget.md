@@ -55,11 +55,20 @@ Connection settings: `journal_mode=WAL`, `busy_timeout=5000`,
 
 - `SetMaxOpenConns(1)` matches the single writer; `SQLITE_BUSY` storms cannot
   happen by construction.
-- Backup is `sqlite3 prw.db "VACUUM INTO 'backup.db'"`, not `cp prw.db*`: in WAL
-  mode a filesystem copy can catch the main file, `-wal`, and `-shm` in
-  inconsistent states and lose committed-but-not-checkpointed transactions.
-  `VACUUM INTO` (or the Online Backup API) produces a consistent snapshot
-  without stopping the worker. Inspection is `sqlite3 prw.db`.
+- Backup is `VACUUM INTO`, not `cp prw.db*`: in WAL mode a filesystem copy can
+  catch the main file, `-wal`, and `-shm` in inconsistent states and lose
+  committed-but-not-checkpointed transactions. `VACUUM INTO` (or the Online
+  Backup API) produces a consistent snapshot without stopping the worker. The
+  destination must be a new path — SQLite refuses to overwrite an existing
+  non-empty file — so the timestamp is part of the command, not an optional
+  nicety:
+
+  ```sh
+  sqlite3 prw.db "VACUUM INTO 'backup-$(date -u +%Y%m%dT%H%M%SZ).db'"
+  ```
+
+  Inspection is `sqlite3 prw.db`.
+
 - The queue is polled rather than pushed, so a lost notification degrades
   latency, not correctness.
 - A job left in `running` by a crash is picked up again on start. That is safe

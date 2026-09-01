@@ -102,6 +102,31 @@ func TestFingerprintIgnoresBodyWording(t *testing.T) {
 	}
 }
 
+// The NUL-joined fingerprint is injective only while no field contains a NUL of
+// its own. JSON can encode one, so an engine could otherwise emit a finding
+// that fingerprints identically to a real one and silently suppress it.
+func TestParseResultDropsFindingsCarryingNUL(t *testing.T) {
+	// ("a.go" + NUL + "shadow", "t") and ("a.go", "shadow" + NUL + "t") join to
+	// the same byte string, so the second would displace the first.
+	out := `{"summary":"s","findings":[
+	  {"file":"a.go\u0000shadow","line":1,"severity":"major","title":"t","body":"b"},
+	  {"file":"a.go","line":2,"severity":"major","title":"shadow\u0000t","body":"b"},
+	  {"file":"real.go","line":3,"severity":"major","title":"kept","body":"b"}]}`
+
+	res, err := parseResult(out)
+	if err != nil {
+		t.Fatalf("parseResult: %v", err)
+	}
+
+	if len(res.Findings) != 1 {
+		t.Fatalf("findings = %+v, want only the NUL-free one", res.Findings)
+	}
+
+	if res.Findings[0].File != "real.go" {
+		t.Fatalf("kept %q, want real.go", res.Findings[0].File)
+	}
+}
+
 type fakeEngine struct {
 	name string
 	res  Result

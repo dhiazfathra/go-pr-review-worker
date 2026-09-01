@@ -129,23 +129,39 @@ func (c Config) validate() error {
 }
 
 // requireSecureURL rejects a forge API endpoint that would send an
-// authenticated request over plaintext, except for loopback addresses used by
-// tests.
+// authenticated request over plaintext. Every request carries a forge token,
+// so the scheme is a credential-confidentiality decision, not a preference.
 func requireSecureURL(name, raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("%s %q: %w", name, raw, err)
 	}
 
+	// "https:host", "https:" and "https:///path" all parse with the right
+	// scheme and an empty host, which would otherwise pass as secure and then
+	// fail later as an unusable relative URL.
+	if u.Hostname() == "" {
+		return fmt.Errorf("%s %q has no host", name, raw)
+	}
+
 	if u.Scheme == "https" {
 		return nil
 	}
 
-	if u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1") {
+	// A loopback endpoint never leaves the machine, so plaintext there is a
+	// local-fixture concern rather than an exposed credential — but it stays an
+	// explicit opt-in, so a typo in a real deployment cannot silently downgrade.
+	loopback := u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1"
+	if u.Scheme == "http" && loopback && boolean("PRW_ALLOW_INSECURE_LOOPBACK", false) {
 		return nil
 	}
 
-	return fmt.Errorf("%s %q must use https (or a loopback http address for tests)", name, raw)
+	if u.Scheme == "http" && loopback {
+		return fmt.Errorf(
+			"%s %q is plaintext: set PRW_ALLOW_INSECURE_LOOPBACK=true to allow a loopback endpoint", name, raw)
+	}
+
+	return fmt.Errorf("%s %q must use https", name, raw)
 }
 
 // GitHubEnabled reports whether GitHub webhooks can be served.

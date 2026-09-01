@@ -73,9 +73,17 @@ PRW_GITHUB_WEBHOOK_SECRET=... scripts/deliver.sh owner/repo 7 opened
 PRW_GITHUB_WEBHOOK_SECRET=... scripts/deliver.sh owner/repo 7 synchronize
 ```
 
-With a public URL, `gh extension install cli/gh-webhook` once, then
-`gh webhook forward --repo=owner/repo --events=pull_request
---url=http://localhost:8080/webhook/github` works too.
+`gh webhook forward` works too — `gh extension install cli/gh-webhook` once,
+then the command below. Its `--url` stays `localhost`: the CLI holds the
+connection open, so this is local testing as well, not a public endpoint. Pass
+the secret explicitly, because without `--secret` the hook is created without
+one, the worker rejects every delivery with `401`, and nothing is enqueued.
+
+```bash
+gh webhook forward --repo=owner/repo --events=pull_request \
+  --secret="$PRW_GITHUB_WEBHOOK_SECRET" \
+  --url=http://localhost:8080/webhook/github
+```
 
 ### Engine environment
 
@@ -87,13 +95,27 @@ directories, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` and
 
 Authentication therefore has to arrive through one of the allowlisted paths:
 
-- **Subscription login** (`claude` already logged in on the host) works with no
-  extra configuration. The credentials live in the OS keyring, which is why
-  `HOME`, `USER` and `LOGNAME` are on the allowlist — the keyring lookup is
-  keyed by the account name, and without them every invocation fails with
+- **Subscription login** (`claude` already logged in) works with no extra
+  configuration. The credentials live in the OS keyring, which is why `HOME`,
+  `USER` and `LOGNAME` are on the allowlist — the keyring lookup is keyed by
+  the account name, and without them every invocation fails with
   `Invalid API key · Please run /login` on a host where the CLI works fine
   interactively.
-- **API key**: set `ANTHROPIC_API_KEY` on the worker's process.
+
+  Those credentials are **per account**, so the login has to be done as the
+  account the unit runs under, not as your own. With the sample unit that is
+  `pr-review-worker`, which has `/usr/sbin/nologin` as its shell:
+
+  ```bash
+  sudo -u pr-review-worker HOME=/var/lib/pr-review-worker -s /bin/sh -c 'claude /login'
+  ```
+
+  Logging in as yourself leaves the service failing with the same
+  `Invalid API key` message while `claude` works in your own shell.
+
+- **API key**: set `ANTHROPIC_API_KEY` on the worker's process. This is the
+  simpler option for an unattended deployment, since it needs no interactive
+  login as the service account.
 
 Anything else the CLI reads has to be added to `childEnvAllowlist` in
 `internal/reviewer/cli.go` deliberately. In particular, an older Claude Code
@@ -131,6 +153,7 @@ All configuration is environment variables; there is no config file.
 | `PRW_GITLAB_TOKEN`              | —                              | Token with `api` scope                       |
 | `PRW_GITLAB_WEBHOOK_SECRET`     | —                              | Secret token for `/webhook/gitlab`           |
 | `PRW_GITLAB_API`                | `https://gitlab.com/api/v4`    | Change for self-managed                      |
+| `PRW_ALLOW_INSECURE_LOOPBACK`   | `false`                        | Permit a plaintext loopback forge endpoint   |
 | `PRW_CLAUDE_BIN`                | `claude`                       | Primary engine binary                        |
 | `PRW_CLAUDE_ARGS`               | `--print --output-format text` | Headless-mode flags                          |
 | `PRW_OPENCODE_BIN`              | `opencode`                     | Fallback engine binary                       |
