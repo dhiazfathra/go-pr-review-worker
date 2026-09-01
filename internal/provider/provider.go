@@ -1,0 +1,114 @@
+// Package provider wraps the forge REST APIs the worker talks to. Only the
+// handful of calls a review needs are implemented, so there is no SDK
+// dependency and the binary stays small.
+package provider
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// PullRequest is the subset of PR metadata a review needs.
+type PullRequest struct {
+	Title   string
+	Body    string
+	HeadSHA string
+	BaseSHA string
+}
+
+// InlineComment is one review comment anchored to a line of the new file.
+type InlineComment struct {
+	Path string
+	Line int
+	Body string
+}
+
+// Provider is a forge the worker can read diffs from and post reviews to.
+type Provider interface {
+	Name() string
+	// PullRequest fetches PR metadata.
+	PullRequest(ctx context.Context, repo string, number int) (PullRequest, error)
+	// Diff returns the unified diff of the whole PR.
+	Diff(ctx context.Context, repo string, number int) (string, error)
+	// CompareDiff returns the unified diff between two commits, used to scope
+	// the second review pass to what changed since the first.
+	CompareDiff(ctx context.Context, repo, from, to string) (string, error)
+	// PostInline posts one inline comment on the PR at headSHA.
+	PostInline(ctx context.Context, repo string, number int, headSHA string, c InlineComment) error
+	// PostSummary posts the summary comment and returns its provider id.
+	PostSummary(ctx context.Context, repo string, number int, body string) (string, error)
+	// UpdateSummary edits a previously posted summary comment in place.
+	UpdateSummary(ctx context.Context, repo, commentID, body string) error
+}
+
+// httpClient is the shared transport. One client, reused, keeps idle memory flat.
+type httpClient struct {
+	base  string
+	token string
+	hc    *http.Client
+	// authHeader renders the provider's auth header value.
+	authHeader func(token string) (name, value string)
+}
+
+func newHTTPClient(base, token string, authHeader func(string) (string, string)) *httpClient {
+	return &httpClient{
+		base:       strings.TrimRight(base, "/"),
+		token:      token,
+		hc:         &http.Client{Timeout: 30 * time.Second},
+		authHeader: authHeader,
+	}
+}
+
+// do performs a request and returns the body, failing on any non-2xx status.
+func (c *httpClient) do(
+	ctx context.Context,
+	method, path string,
+	body io.Reader,
+	headers map[string]string,
+) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return nil, fmt.Errorf("building %s %s: %w", method, path, err)
+	}
+
+	name, value := c.authHeader(c.token)
+	req.Header.Set(name, value)
+
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	res, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	// Cap the read: a diff on a huge PR must not blow up a 4 GB box.
+	raw, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s %s body: %w", method, path, err)
+	}
+
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		return raw, fmt.Errorf("%s %s: unexpected status %d: %s", method, path, res.StatusCode, snippet(raw))
+	}
+
+	return raw, nil
+}
+
+// maxResponseBytes bounds any single API response, diffs included.
+const maxResponseBytes = 8 << 20
+
+func snippet(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > 200 {
+		s = s[:200]
+	}
+
+	return s
+}
