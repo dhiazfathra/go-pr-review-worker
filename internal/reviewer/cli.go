@@ -36,6 +36,32 @@ var rateLimitSignals = regexp.MustCompile(`(?i)` + strings.Join([]string{
 	`retry[ _-]after`,
 }, "|"))
 
+// defaultTimeout applies when CLI.Timeout is unset, so a zero value never
+// produces an already-expired context.
+const defaultTimeout = 10 * time.Minute
+
+// childEnvAllowlist are the variables the engine process needs. Everything
+// else in the worker's environment — forge tokens, webhook secrets — stays
+// out, since contributor-controlled PR content reaches the engine and could
+// otherwise exfiltrate them through its tools.
+var childEnvAllowlist = []string{
+	"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR",
+	"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+}
+
+// childEnv builds a minimal environment for the engine subprocess.
+func childEnv() []string {
+	env := []string{"CI=1"}
+
+	for _, k := range childEnvAllowlist {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+
+	return env
+}
+
 // CLI runs an agentic coding CLI in headless mode as a review engine.
 type CLI struct {
 	// EngineName is the adapter name used in logs and the summary footer.
@@ -95,13 +121,18 @@ func (c CLI) Review(ctx context.Context, req Request) (Result, error) {
 // timeout the whole group is killed, so a CLI that spawned children (a shell,
 // a language server) cannot leak processes onto a small VM.
 func (c CLI) run(ctx context.Context, prompt string) (string, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.Command(c.Binary, c.Args...)
+	cmd := exec.Command(c.Binary, c.Args...) // nosemgrep: dangerous-exec-command -- Binary/Args come from operator-set PRW_*_BIN/PRW_*_ARGS config (internal/config), never from PR/webhook content
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "CI=1")
+	cmd.Env = childEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &stdout, remaining: c.MaxOutputBytes}
@@ -123,29 +154,41 @@ func (c CLI) run(ctx context.Context, prompt string) (string, string, error) {
 		return stdout.String(), stderr.String(), nil
 
 	case <-ctx.Done():
-		c.kill(cmd)
-		<-done // reap, the group is already signalled
+		if !c.kill(cmd, done) {
+			<-done // reap, the group is already signalled
+		}
 
 		return stdout.String(), stderr.String(),
-			fmt.Errorf("%s timed out after %s: %w", c.Binary, c.Timeout, ctx.Err())
+			fmt.Errorf("%s timed out after %s: %w", c.Binary, timeout, ctx.Err())
 	}
 }
 
 // kill signals the whole process group, then SIGKILLs it after a short grace
-// period so a CLI ignoring SIGTERM still cannot hold the worker.
-func (c CLI) kill(cmd *exec.Cmd) {
+// period so a CLI ignoring SIGTERM still cannot hold the worker. It reports
+// whether cmd.Wait already returned during the grace period, so the caller
+// never reaps twice and SIGKILL never reaches a pid recycled by the OS.
+func (c CLI) kill(cmd *exec.Cmd, done <-chan error) bool {
 	pgid := -cmd.Process.Pid
 
 	if err := syscall.Kill(pgid, syscall.SIGTERM); err != nil && c.Logger != nil {
 		c.Logger.Warn("sigterm to engine group failed", "engine", c.EngineName, "error", err)
 	}
 
-	time.Sleep(2 * time.Second)
+	grace := time.NewTimer(2 * time.Second)
+	defer grace.Stop()
+
+	select {
+	case <-done:
+		return true
+	case <-grace.C:
+	}
 
 	if err := syscall.Kill(pgid, syscall.SIGKILL); err != nil &&
 		!errors.Is(err, syscall.ESRCH) && c.Logger != nil {
 		c.Logger.Warn("sigkill to engine group failed", "engine", c.EngineName, "error", err)
 	}
+
+	return false
 }
 
 // limitedWriter discards everything past remaining bytes instead of failing,

@@ -466,12 +466,15 @@ func (w *Worker) reportFailure(ctx context.Context, job store.Job, cause error, 
 		return
 	}
 
+	// The full cause (command output, paths, response bodies) stays in the
+	// log only: it can carry internal details that should not reach a
+	// public PR comment.
 	body := fmt.Sprintf(
-		"%s\n\n**Automated review failed** after %d attempts and will not be retried for `%s`.\n\n```\n%s\n```\n",
+		"%s\n\n**Automated review failed** after %d attempts and will not be retried for `%s`. "+
+			"See the worker log for details.\n",
 		summaryMarker,
 		job.Attempts,
 		job.HeadSHA,
-		cause,
 	)
 
 	if _, err := prov.PostSummary(ctx, job.Repo, job.PRNumber, body); err != nil {

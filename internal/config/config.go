@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -97,7 +98,54 @@ func (c Config) validate() error {
 		return fmt.Errorf("PRW_MIN_SEVERITY %q is not one of critical|major|minor|nit", c.MinSeverity)
 	}
 
+	for name, v := range map[string]int{
+		"PRW_MAX_CYCLES":   c.MaxCycles,
+		"PRW_MAX_ATTEMPTS": c.MaxAttempts,
+		"PRW_MAX_COMMENTS": c.MaxComments,
+		"PRW_MAX_FINDINGS": c.MaxFindings,
+	} {
+		if v <= 0 {
+			return fmt.Errorf("%s must be positive, got %d", name, v)
+		}
+	}
+
+	for name, v := range map[string]time.Duration{
+		"PRW_ENGINE_TIMEOUT": c.EngineTimeout,
+		"PRW_RETRY_DELAY":    c.RetryDelay,
+		"PRW_POLL_INTERVAL":  c.PollInterval,
+	} {
+		if v <= 0 {
+			return fmt.Errorf("%s must be positive, got %s", name, v)
+		}
+	}
+
+	for name, v := range map[string]string{"PRW_GITHUB_API": c.GitHubAPI, "PRW_GITLAB_API": c.GitLabAPI} {
+		if err := requireSecureURL(name, v); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// requireSecureURL rejects a forge API endpoint that would send an
+// authenticated request over plaintext, except for loopback addresses used by
+// tests.
+func requireSecureURL(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", name, raw, err)
+	}
+
+	if u.Scheme == "https" {
+		return nil
+	}
+
+	if u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1") {
+		return nil
+	}
+
+	return fmt.Errorf("%s %q must use https (or a loopback http address for tests)", name, raw)
 }
 
 // GitHubEnabled reports whether GitHub webhooks can be served.

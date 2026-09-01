@@ -1,5 +1,6 @@
 # /etc/systemd/system/pr-review-worker.service
 #
+#   useradd --system --home /var/lib/pr-review-worker --shell /usr/sbin/nologin pr-review-worker
 #   install -m 0755 pr-review-worker /usr/local/bin/
 #   install -m 0600 prw.env /etc/pr-review-worker.env
 #   systemctl enable --now pr-review-worker
@@ -14,6 +15,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Runs as its own unprivileged account, not root, so a compromised review CLI
+# (it executes on contributor-controlled diffs) cannot touch anything outside
+# StateDirectory.
+User=pr-review-worker
+Group=pr-review-worker
 ExecStart=/usr/local/bin/pr-review-worker
 EnvironmentFile=/etc/pr-review-worker.env
 Environment=PRW_DB=/var/lib/pr-review-worker/prw.db

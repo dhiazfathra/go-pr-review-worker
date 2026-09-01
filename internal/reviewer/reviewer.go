@@ -56,9 +56,12 @@ type Finding struct {
 }
 
 // Fingerprint identifies a finding for dedup across review cycles. The body is
-// deliberately excluded: the same issue reworded must not be posted twice.
+// deliberately excluded: the same issue reworded must not be posted twice. The
+// separator is NUL, not "|", because a file path or title cannot legally
+// contain a NUL byte but could contain "|" — a "|"-joined ("a|b", "c") and
+// ("a", "b|c") would otherwise fingerprint identically.
 func (f Finding) Fingerprint() string {
-	sum := sha256.Sum256([]byte(strings.ToLower(f.File + "|" + f.Title)))
+	sum := sha256.Sum256([]byte(strings.ToLower(f.File + "\x00" + f.Title)))
 
 	return hex.EncodeToString(sum[:8])
 }
@@ -150,7 +153,7 @@ func parseResult(out string) (Result, error) {
 	kept := make([]Finding, 0, len(res.Findings))
 
 	for _, f := range res.Findings {
-		if f.File == "" || f.Title == "" {
+		if f.File == "" || f.Title == "" || f.Line <= 0 {
 			continue // unanchorable, would post as a comment on nothing
 		}
 

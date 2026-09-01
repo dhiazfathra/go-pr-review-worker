@@ -9,7 +9,31 @@ import (
 	"github.com/dhiazfathra/go-pr-review-worker/internal/reviewer"
 )
 
+// prwVars lists every PRW_* variable config.Load reads. clearEnv sets each to
+// empty (config.Load treats "" the same as unset), via t.Setenv so the real
+// value — if a developer or CI runner happens to export one — is restored
+// after the test instead of leaking into the next one.
+var prwVars = []string{
+	"PRW_ADDR", "PRW_DB",
+	"PRW_GITHUB_TOKEN", "PRW_GITHUB_API", "PRW_GITHUB_WEBHOOK_SECRET",
+	"PRW_GITLAB_TOKEN", "PRW_GITLAB_API", "PRW_GITLAB_WEBHOOK_SECRET",
+	"PRW_CLAUDE_BIN", "PRW_CLAUDE_ARGS", "PRW_OPENCODE_BIN", "PRW_OPENCODE_ARGS",
+	"PRW_ENGINE_TIMEOUT", "PRW_MAX_CYCLES", "PRW_MAX_ATTEMPTS", "PRW_MAX_COMMENTS",
+	"PRW_MAX_FINDINGS", "PRW_MIN_SEVERITY", "PRW_RETRY_DELAY", "PRW_POLL_INTERVAL",
+	"PRW_ANNOUNCE_BUDGET_EXHAUSTED", "PRW_LOG_LEVEL",
+}
+
+func clearEnv(t *testing.T) {
+	t.Helper()
+
+	for _, k := range prwVars {
+		t.Setenv(k, "")
+	}
+}
+
 func TestLoadRequiresAtLeastOneProvider(t *testing.T) {
+	clearEnv(t)
+
 	_, err := config.Load()
 	if err == nil {
 		t.Fatal("want error when no provider credentials are set")

@@ -14,10 +14,13 @@ comparing bodies would not catch a repeat.
 
 ## Decision
 
-- **Inline comments**: fingerprint = `sha256(lower(file + "|" + title))[:8]`.
-  The body and the line number are excluded: a reworded body or a shifted line
-  is the same finding. `posted_comments(pr_key, fingerprint)` is a primary key,
-  so `Store.ClaimFingerprints` atomically returns only the ones never posted for
+- **Inline comments**: fingerprint = `sha256(lower(file + "\x00" + title))[:8]`.
+  NUL, not `|`, joins the two fields: a file path or title cannot contain a NUL
+  byte, so the join is injective — `("a|b", "c")` and `("a", "b|c")` would
+  otherwise fingerprint identically under a `|` join. The body and the line
+  number are excluded: a reworded body or a shifted line is the same finding.
+  `posted_comments(pr_key, fingerprint)` is a primary key, so
+  `Store.ClaimFingerprints` atomically returns only the ones never posted for
   that PR and records them in the same step.
 - **Summary comment**: a new comment per cycle, so pass 1's summary stays
   visible next to pass 2's. Within a cycle, a retry edits the existing summary

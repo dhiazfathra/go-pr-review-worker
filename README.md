@@ -12,7 +12,7 @@ supervising it.
 
 ## How a review happens
 
-```
+```text
 PR opened ──▶ POST /webhook/github ──▶ verify HMAC ──▶ enqueue (SQLite)
                                                           │
                                           ┌───────────────┘
@@ -73,7 +73,8 @@ PRW_GITHUB_WEBHOOK_SECRET=... scripts/deliver.sh owner/repo 7 opened
 PRW_GITHUB_WEBHOOK_SECRET=... scripts/deliver.sh owner/repo 7 synchronize
 ```
 
-With a public URL, `gh webhook forward --repo=owner/repo --events=pull_request
+With a public URL, `gh extension install cli/gh-webhook` once, then
+`gh webhook forward --repo=owner/repo --events=pull_request
 --url=http://localhost:8080/webhook/github` works too.
 
 ### Engine environment
@@ -134,7 +135,7 @@ worker refuses to start.
 
 ## Architecture
 
-```
+```text
 cmd/pr-review-worker      wiring, HTTP server, graceful shutdown
 internal/webhook          thin intake adapter: verify, parse, enqueue
 internal/store            SQLite: jobs, pr_reviews, posted_comments

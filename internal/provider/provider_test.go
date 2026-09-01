@@ -213,15 +213,6 @@ func TestGitHubMalformedJSONIsReported(t *testing.T) {
 	}
 }
 
-func TestGitHubDefaultBaseURL(t *testing.T) {
-	// No network call: only prove the default is wired, since an empty base
-	// would otherwise produce a relative, unusable URL.
-	if _, err := provider.NewGitHub("", "tok").
-		PullRequest(t.Context(), "acme/app", 7); err == nil {
-		t.Skip("unexpectedly reached api.github.com; nothing to assert offline")
-	}
-}
-
 func TestGitLabDiffRendersUnifiedDiff(t *testing.T) {
 	srv, log := server(t, map[string]string{
 		"GET /projects/grp%2Fproj/merge_requests/4/changes": `{"changes":[
