@@ -61,6 +61,34 @@ esac`
 	}
 }
 
+// A CLI authenticated by subscription login reads the OS keyring, and that
+// lookup is keyed by the account name. Stripping USER/LOGNAME made the engine
+// fail with "Invalid API key" on a host where the CLI worked interactively.
+func TestCLIChildEnvCarriesKeyringIdentityButNoSecrets(t *testing.T) {
+	t.Setenv("USER", "prw")
+	t.Setenv("LOGNAME", "prw")
+	t.Setenv("PRW_GITHUB_TOKEN", "ghp-must-not-leak")
+
+	// The stub reports its own environment, so this asserts what the engine
+	// actually receives rather than what the allowlist says.
+	res, err := newCLI(t, `cat >/dev/null
+echo "{\"summary\":\"$(env | sort | tr '\n' ';')\",\"findings\":[]}"`, 10*time.Second).
+		Review(context.Background(), Request{Repo: "r", PRNumber: 1, Diff: "d"})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+
+	for _, want := range []string{"USER=prw", "LOGNAME=prw"} {
+		if !strings.Contains(res.Summary, want) {
+			t.Errorf("engine env is missing %s; keyring auth would fail:\n%s", want, res.Summary)
+		}
+	}
+
+	if strings.Contains(res.Summary, "ghp-must-not-leak") {
+		t.Errorf("forge token reached the engine:\n%s", res.Summary)
+	}
+}
+
 func TestCLIDetectsRateLimitSignals(t *testing.T) {
 	cases := []struct {
 		name   string

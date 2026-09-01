@@ -79,8 +79,24 @@ With a public URL, `gh extension install cli/gh-webhook` once, then
 
 ### Engine environment
 
-The worker passes its own environment to the engine, so anything the CLI reads
-is configured on the worker's process. In particular, an older Claude Code
+The engine does **not** inherit the worker's environment. Contributor-controlled
+diff content reaches the engine, so it is spawned with an allowlist only —
+`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TMPDIR`, the `XDG_*`
+directories, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` and
+`ANTHROPIC_MODEL`. Forge tokens and webhook secrets are never passed down.
+
+Authentication therefore has to arrive through one of the allowlisted paths:
+
+- **Subscription login** (`claude` already logged in on the host) works with no
+  extra configuration. The credentials live in the OS keyring, which is why
+  `HOME`, `USER` and `LOGNAME` are on the allowlist — the keyring lookup is
+  keyed by the account name, and without them every invocation fails with
+  `Invalid API key · Please run /login` on a host where the CLI works fine
+  interactively.
+- **API key**: set `ANTHROPIC_API_KEY` on the worker's process.
+
+Anything else the CLI reads has to be added to `childEnvAllowlist` in
+`internal/reviewer/cli.go` deliberately. In particular, an older Claude Code
 install may be pinned to a retired model and fail every invocation with
 `404 not_found_error: model: ...`; set the model on the worker:
 

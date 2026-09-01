@@ -44,9 +44,16 @@ const defaultTimeout = 10 * time.Minute
 // else in the worker's environment — forge tokens, webhook secrets — stays
 // out, since contributor-controlled PR content reaches the engine and could
 // otherwise exfiltrate them through its tools.
+//
+// USER and LOGNAME are not decoration: a CLI authenticated by subscription
+// login rather than an API key reads its credentials from the OS keyring
+// (macOS Keychain, libsecret), and that lookup is keyed by the account name.
+// Drop them and the engine fails with "Invalid API key · Please run /login"
+// on a host where `claude` works fine interactively.
 var childEnvAllowlist = []string{
-	"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR",
-	"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+	"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR",
+	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR",
+	"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL",
 }
 
 // childEnv builds a minimal environment for the engine subprocess.
