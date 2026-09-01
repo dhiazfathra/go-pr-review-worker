@@ -247,22 +247,27 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 
 	log.Info("engine finished", "engine", res.Engine, "findings", len(res.Findings))
 
-	posted, err := w.postFindings(ctx, job, prov, res, log)
+	posted, unposted, err := w.postFindings(ctx, job, prov, res, log)
 	if err != nil {
 		return err
 	}
 
-	body := renderSummary(res, cycle, w.cfg.MaxCycles, posted)
+	body := renderSummary(res, cycle, w.cfg.MaxCycles, posted, unposted)
 
 	commentID, err := w.postSummary(ctx, job, prov, state, cycle, body)
 	if err != nil {
 		return err
 	}
 
-	state.Cycle = cycle
-	state.LastReviewedSHA = job.HeadSHA
 	state.SummaryCommentID = commentID
 	state.SummaryCycle = cycle
+
+	if err := w.store.SavePRState(ctx, prKey, state); err != nil {
+		return err
+	}
+
+	state.Cycle = cycle
+	state.LastReviewedSHA = job.HeadSHA
 
 	if err := w.store.SavePRState(ctx, prKey, state); err != nil {
 		return err
@@ -303,34 +308,26 @@ func (w *Worker) scopedDiff(
 	return prov.Diff(ctx, job.Repo, job.PRNumber)
 }
 
-// postFindings posts the inline comments that survive severity filtering, the
-// per-cycle cap, and cross-cycle fingerprint dedup. It returns the findings
-// actually posted so the summary can list the rest.
+// postFindings posts the inline comments that survive severity filtering,
+// cross-cycle fingerprint dedup, and the per-cycle cap — in that order, so
+// findings already commented on in an earlier pass never consume the budget.
+// It returns the findings actually posted and the ones that were not, so the
+// summary can list both and no finding is silently dropped.
 func (w *Worker) postFindings(
 	ctx context.Context,
 	job store.Job,
 	prov provider.Provider,
 	res reviewer.Result,
 	log *slog.Logger,
-) ([]reviewer.Finding, error) {
-	candidates := make([]reviewer.Finding, 0, len(res.Findings))
+) ([]reviewer.Finding, []reviewer.Finding, error) {
+	byFingerprint := make(map[string]reviewer.Finding, len(res.Findings))
+	fingerprints := make([]string, 0, len(res.Findings))
 
 	for _, f := range res.Findings {
 		if !f.Severity.AtLeast(w.cfg.MinSeverity) {
 			continue
 		}
 
-		candidates = append(candidates, f)
-
-		if len(candidates) == w.cfg.MaxComments {
-			break
-		}
-	}
-
-	byFingerprint := make(map[string]reviewer.Finding, len(candidates))
-	fingerprints := make([]string, 0, len(candidates))
-
-	for _, f := range candidates {
 		fp := f.Fingerprint()
 		if _, seen := byFingerprint[fp]; seen {
 			continue
@@ -342,10 +339,17 @@ func (w *Worker) postFindings(
 
 	fresh, err := w.store.UnseenFingerprints(ctx, job.PRKey(), fingerprints)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	var overCap []string
+
+	if w.cfg.MaxComments > 0 && len(fresh) > w.cfg.MaxComments {
+		fresh, overCap = fresh[:w.cfg.MaxComments], fresh[w.cfg.MaxComments:]
 	}
 
 	posted := make([]reviewer.Finding, 0, len(fresh))
+	unposted := make([]reviewer.Finding, 0, len(overCap))
 
 	for _, fp := range fresh {
 		f := byFingerprint[fp]
@@ -363,24 +367,31 @@ func (w *Worker) postFindings(
 			// rather than suppressing the finding forever.
 			log.Warn("inline comment rejected", "file", f.File, "line", f.Line, "error", err)
 
+			unposted = append(unposted, f)
+
 			continue
 		}
 
 		if err := w.store.RecordFingerprint(ctx, job.PRKey(), fp); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		posted = append(posted, f)
 	}
 
+	for _, fp := range overCap {
+		unposted = append(unposted, byFingerprint[fp])
+	}
+
 	log.Info(
 		"comments posted",
-		"candidates", len(candidates),
+		"candidates", len(fingerprints),
 		"fresh", len(fresh),
 		"posted", len(posted),
+		"unposted", len(unposted),
 	)
 
-	return posted, nil
+	return posted, unposted, nil
 }
 
 // postSummary posts a new summary comment, or edits the existing one when this

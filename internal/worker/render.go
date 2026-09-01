@@ -30,7 +30,7 @@ func renderComment(f reviewer.Finding) string {
 }
 
 // renderSummary formats the per-cycle summary comment.
-func renderSummary(res reviewer.Result, cycle, maxCycles int, posted []reviewer.Finding) string {
+func renderSummary(res reviewer.Result, cycle, maxCycles int, posted, unposted []reviewer.Finding) string {
 	var b strings.Builder
 
 	b.WriteString(summaryMarker)
@@ -51,6 +51,14 @@ func renderSummary(res reviewer.Result, cycle, maxCycles int, posted []reviewer.
 		fmt.Fprintf(&b, "### %d inline comment(s)\n\n", len(posted))
 
 		for _, f := range posted {
+			fmt.Fprintf(&b, "- %s `%s:%d` — %s\n", severityBadge[f.Severity], f.File, f.Line, f.Title)
+		}
+	}
+
+	if len(unposted) > 0 {
+		fmt.Fprintf(&b, "\n### %d finding(s) without an inline comment\n\n", len(unposted))
+
+		for _, f := range unposted {
 			fmt.Fprintf(&b, "- %s `%s:%d` — %s\n", severityBadge[f.Severity], f.File, f.Line, f.Title)
 		}
 	}

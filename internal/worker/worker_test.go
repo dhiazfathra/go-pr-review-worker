@@ -687,3 +687,87 @@ func TestASuccessfulPostIsNotRepeatedNextPass(t *testing.T) {
 		t.Fatalf("inline = %d comments, want the finding posted exactly once", len(h.prov.inline))
 	}
 }
+
+func TestUnanchoredFindingIsListedInTheSummary(t *testing.T) {
+	engine := &scriptedEngine{results: []reviewer.Result{{
+		Summary:  "s",
+		Findings: []reviewer.Finding{finding("a.go", "nil deref", reviewer.SeverityMajor)},
+	}}}
+
+	h := newHarness(t, worker.Config{}, engine)
+	h.prov.inlineErr = errors.New("422 line not part of the diff")
+
+	h.enqueue(t, "d1", "sha1", store.EventOpened)
+	h.runOnce(t)
+
+	if !strings.Contains(h.prov.summaries[0], "nil deref") {
+		t.Fatalf("rejected finding is lost, not listed in the summary:\n%s", h.prov.summaries[0])
+	}
+}
+
+func TestCommentCapCountsOnlyUnseenFindings(t *testing.T) {
+	engine := &scriptedEngine{results: []reviewer.Result{
+		{Summary: "pass 1", Findings: []reviewer.Finding{finding("a.go", "nil deref", reviewer.SeverityMajor)}},
+		{Summary: "pass 2", Findings: []reviewer.Finding{
+			finding("a.go", "nil deref", reviewer.SeverityMajor), // already posted in pass 1
+			finding("c.go", "new leak", reviewer.SeverityMajor),
+		}},
+	}}
+
+	h := newHarness(t, worker.Config{MaxComments: 1}, engine)
+
+	h.enqueue(t, "d1", "sha1", store.EventOpened)
+	h.runOnce(t)
+
+	h.prov.pr.HeadSHA = "sha2"
+	h.enqueue(t, "d2", "sha2", store.EventSynchronize)
+	h.runOnce(t)
+
+	paths := []string{}
+	for _, c := range h.prov.inline {
+		paths = append(paths, c.Path)
+	}
+
+	if strings.Join(paths, ",") != "a.go,c.go" {
+		t.Fatalf("inline paths = %v; the repeat must not consume the cap", paths)
+	}
+}
+
+func TestOverCapFindingsAreListedInTheSummary(t *testing.T) {
+	engine := &scriptedEngine{results: []reviewer.Result{{
+		Summary: "s",
+		Findings: []reviewer.Finding{
+			finding("a.go", "nil deref", reviewer.SeverityMajor),
+			finding("c.go", "new leak", reviewer.SeverityMajor),
+		},
+	}}}
+
+	h := newHarness(t, worker.Config{MaxComments: 1}, engine)
+	h.enqueue(t, "d1", "sha1", store.EventOpened)
+	h.runOnce(t)
+
+	if len(h.prov.inline) != 1 {
+		t.Fatalf("inline = %d, want the cap to hold at 1", len(h.prov.inline))
+	}
+
+	if !strings.Contains(h.prov.summaries[0], "new leak") {
+		t.Fatalf("capped finding is lost, not listed in the summary:\n%s", h.prov.summaries[0])
+	}
+}
+
+func TestSummaryCommentIDIsPersistedBeforeTheCycleCompletes(t *testing.T) {
+	engine := &scriptedEngine{results: []reviewer.Result{{Summary: "s"}}}
+
+	h := newHarness(t, worker.Config{}, engine)
+	h.enqueue(t, "d1", "sha1", store.EventOpened)
+	h.runOnce(t)
+
+	state, err := h.st.PRState(context.Background(), "github:acme/app#7")
+	if err != nil {
+		t.Fatalf("PRState: %v", err)
+	}
+
+	if state.SummaryCommentID == "" || state.SummaryCycle != 1 {
+		t.Fatalf("state = %+v, want the summary comment recorded for cycle 1", state)
+	}
+}

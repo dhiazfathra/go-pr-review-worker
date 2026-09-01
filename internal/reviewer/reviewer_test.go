@@ -214,3 +214,26 @@ func TestBuildPromptFirstCycleHasNoDeltaWording(t *testing.T) {
 		t.Fatal("first cycle prompt claims to be the incremental pass")
 	}
 }
+
+func TestExtractJSONSkipsProseBraces(t *testing.T) {
+	got, err := extractJSON(`writing to {repo}/out ... {"summary":"s","findings":[]} done`)
+	if err != nil {
+		t.Fatalf("extractJSON: %v", err)
+	}
+
+	if got != `{"summary":"s","findings":[]}` {
+		t.Fatalf("extractJSON = %q", got)
+	}
+}
+
+func TestBuildPromptSecondCycleWithoutPriorFindingsHasNoDanglingList(t *testing.T) {
+	got := buildPrompt(Request{Repo: "r", PRNumber: 1, Title: "t", Diff: "d", Cycle: 2}, 10)
+
+	if !strings.Contains(got, "pass 2 of 2") {
+		t.Fatalf("second cycle prompt lost its scope line:\n%s", got)
+	}
+
+	if strings.Contains(got, "the list above") {
+		t.Fatalf("prompt points at a list that was never rendered:\n%s", got)
+	}
+}

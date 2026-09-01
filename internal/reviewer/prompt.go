@@ -34,15 +34,19 @@ Unified diff to review:
 
 // buildPrompt renders the review instruction for one request.
 func buildPrompt(req Request, maxFindings int) string {
-	scope := ""
-	if req.Cycle > 1 {
-		scope = "Review pass 2 of 2: the diff below contains only what changed since the previous review. Do not re-report anything from the list above.\n"
-	}
-
 	prior := ""
 	if len(req.PriorFindings) > 0 {
 		prior = "Already reported in an earlier pass (do not repeat):\n- " +
 			strings.Join(req.PriorFindings, "\n- ") + "\n"
+	}
+
+	scope := ""
+
+	if req.Cycle > 1 {
+		scope = "Review pass 2 of 2: the diff below contains only what changed since the previous review.\n"
+		if prior != "" {
+			scope = "Review pass 2 of 2: the diff below contains only what changed since the previous review. Do not re-report anything from the list above.\n"
+		}
 	}
 
 	body := ""

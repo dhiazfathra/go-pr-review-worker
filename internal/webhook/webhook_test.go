@@ -388,3 +388,19 @@ func TestOversizedBodyIsRejectedAsTooLargeNotAsABadSignature(t *testing.T) {
 		t.Fatalf("pending = %d, want 0", n)
 	}
 }
+
+func TestGitLabPayloadWithoutAnyHeadSHAIsRejected(t *testing.T) {
+	mux, st, _ := harness(t)
+
+	payload := `{"project":{"path_with_namespace":"grp/proj"},"object_attributes":{"iid":4,` +
+		`"action":"open","last_commit":{"id":""},"diff_refs":{"base_sha":"b1","head_sha":""}}}`
+
+	rec := postGitLab(t, mux, "Merge Request Hook", gitlabSecret, payload)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+
+	if _, err := st.ClaimNext(t.Context()); err == nil {
+		t.Fatal("a job with an empty head sha was enqueued; it would skip review silently")
+	}
+}

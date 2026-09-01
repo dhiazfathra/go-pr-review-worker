@@ -160,15 +160,32 @@ func parseResult(out string) (Result, error) {
 	return res, nil
 }
 
-// extractJSON returns the outermost JSON object in s, scanning from the last
-// opening brace that yields balanced output. String literals are respected so
-// a brace inside a comment body does not confuse the scan.
+// extractJSON returns the first JSON object in s that is both balanced and
+// valid, trying each opening brace in turn. Prose around the payload often
+// contains a stray brace ("writing to {repo}/out"), so anchoring blindly on
+// the first one would fail the whole pass. String literals are respected so a
+// brace inside a comment body does not confuse the scan.
 func extractJSON(s string) (string, error) {
-	start := strings.Index(s, "{")
-	if start < 0 {
+	if !strings.Contains(s, "{") {
 		return "", fmt.Errorf("no json object in engine output (%d bytes)", len(s))
 	}
 
+	for start := 0; start < len(s); start++ {
+		if s[start] != '{' {
+			continue
+		}
+
+		if candidate, ok := balancedObject(s, start); ok && json.Valid([]byte(candidate)) {
+			return candidate, nil
+		}
+	}
+
+	return "", errors.New("unbalanced json object in engine output")
+}
+
+// balancedObject returns the substring of s starting at the brace at start and
+// ending at its matching close brace, if there is one.
+func balancedObject(s string, start int) (string, bool) {
 	var (
 		depth    int
 		inString bool
@@ -192,10 +209,10 @@ func extractJSON(s string) (string, error) {
 		case ch == '}':
 			depth--
 			if depth == 0 {
-				return s[start : i+1], nil
+				return s[start : i+1], true
 			}
 		}
 	}
 
-	return "", errors.New("unbalanced json object in engine output")
+	return "", false
 }

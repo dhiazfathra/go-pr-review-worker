@@ -272,6 +272,10 @@ func (h *Handler) gitlabJob(r *http.Request, body []byte) (store.Job, error) {
 		head = attrs.LastCommit.ID
 	}
 
+	if head == "" {
+		return store.Job{}, errors.New("payload has no head sha")
+	}
+
 	return store.Job{
 		DeliveryID: fmt.Sprintf("gitlab:%s#%d:%s", payload.Project.PathWithNamespace, attrs.IID, head),
 		Provider:   "gitlab",
