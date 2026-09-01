@@ -13,7 +13,7 @@ a markdown fence, or append a closing remark. The worker needs
 
 ## Decision
 
-The prompt *is* the contract (`internal/reviewer/prompt.go`):
+The prompt _is_ the contract (`internal/reviewer/prompt.go`):
 
 - Reply with exactly one JSON object, no prose, no fence.
 - Schema is stated inline, including that `line` must be a line the diff adds or
@@ -22,10 +22,13 @@ The prompt *is* the contract (`internal/reviewer/prompt.go`):
   findings, empty findings is a valid answer.
 
 Parsing is deliberately tolerant of the CLI ignoring the "no prose" part:
-`extractJSON` scans for the first balanced JSON object, respecting string
-literals so a `}` inside a comment body cannot end the scan early. Findings
-without a file or a title are dropped (they cannot be anchored); an unknown
-severity degrades to `minor` rather than failing the whole pass.
+`extractJSON` scans every balanced, string-literal-respecting JSON object in
+the output and picks the last one that carries a `findings` or `summary` key,
+falling back to the last balanced object overall. An agentic CLI often prints
+a status/telemetry object before the payload, so "last" beats "first"; a `}`
+inside a comment body cannot end a scan early. Findings without a file or a
+title are dropped (they cannot be anchored); an unknown severity degrades to
+`minor` rather than failing the whole pass.
 
 The prompt is delivered on **stdin**, never as an argv element, so a
 megabyte-scale diff cannot hit `ARG_MAX`.
@@ -35,7 +38,7 @@ megabyte-scale diff cannot hit `ARG_MAX`.
 ### The CLI's own structured output mode (`--output-format json`)
 
 - Pros: machine-readable envelope.
-- Cons: the envelope is about the *session* (turns, cost, tool calls); the
+- Cons: the envelope is about the _session_ (turns, cost, tool calls); the
   review still arrives as free text inside it. It also differs between the two
   engines, so the parser would need to be per-engine.
 - Rejected: the schema has to be specified in the prompt regardless, at which

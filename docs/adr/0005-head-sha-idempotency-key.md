@@ -7,11 +7,10 @@ Accepted (2026-09-01)
 ## Context
 
 Both forges redeliver webhooks: GitHub retries failed deliveries with the
-*same* `X-GitHub-Delivery` UUID and offers manual redelivery from the UI;
+_same_ `X-GitHub-Delivery` UUID and offers manual redelivery from the UI;
 GitLab retries on timeout. A redelivery must not consume a review cycle or
 duplicate comments. Separately, two distinct deliveries can describe the same
-state (a `synchronize` fired twice for one push, or `reopened` after `opened`
-with no new commits).
+state (a `synchronize` fired twice for one push).
 
 ## Decision
 
@@ -26,6 +25,11 @@ from the transport:
 handler answers `200` instead of `202` and enqueues nothing. The worker adds a
 second guard: a job whose head SHA equals `pr_reviews.last_reviewed_sha` is
 skipped without spending a cycle.
+
+A `reopened`/`reopen` event appends `:reopened` to the key instead, so a
+reopen at the same head SHA as the original `opened` delivery does not
+collapse into it — the reopen must reach the worker to reset the budget
+([ADR-0004](0004-two-review-cycles-per-pull-request.md)).
 
 ## Alternatives considered
 

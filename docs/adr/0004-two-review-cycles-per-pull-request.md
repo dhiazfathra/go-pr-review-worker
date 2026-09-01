@@ -13,7 +13,7 @@ and the behaviour on those pushes needs to be decided, not left implicit.
 
 ## Decision
 
-- `pr_reviews.cycle` counts *completed* passes, keyed by
+- `pr_reviews.cycle` counts _completed_ passes, keyed by
   `provider:repo#number` — not by webhook delivery, not by branch name.
 - Cycle 1 is triggered by `opened` / `reopened` / `ready_for_review` (GitHub) or
   `open` / `reopen` (GitLab); cycle 2 by `synchronize` (GitHub) or `update` with
@@ -45,8 +45,10 @@ Suppress the notice entirely with `PRW_ANNOUNCE_BUDGET_EXHAUSTED=false`.
 
 ## Consequences
 
-- Reopening a PR does not reset the budget (the row is keyed by PR number and
-  survives). Resetting it is a deliberate manual act: delete the row.
+- Reopening a PR resets the budget: a `reopened`/`reopen` event deletes the
+  PR's `pr_reviews` and `posted_comments` rows before the cycle count is read,
+  so the reopened PR gets a fresh two-pass budget. It can also still be reset
+  manually by deleting the row.
 - The budget is persisted, so a restart mid-review cannot grant a third pass
   ([ADR-0002](0002-sqlite-for-queue-and-review-budget.md)).
 - `PRW_MAX_CYCLES` exists for other deployments, but 2 is the specified default.

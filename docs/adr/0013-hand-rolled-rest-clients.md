@@ -14,8 +14,10 @@ compare two commits, post an inline comment, post a comment, edit a comment.
 
 `internal/provider` implements those six calls over `net/http` behind one
 `Provider` interface, with a shared `httpClient` that sets auth, bounds the
-response at 8 MB, and turns any non-2xx into an error carrying the status and a
-200-character body snippet.
+response at 8 MB — reading one byte past the cap so an oversized body fails
+loudly with an explicit error instead of silently reviewing a truncated diff —
+and turns any non-2xx into an error carrying the status and a 200-character
+body snippet.
 
 ## Alternatives considered
 
