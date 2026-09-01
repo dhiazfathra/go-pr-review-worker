@@ -30,3 +30,31 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+.tokensave
+
+# Ruflo local secrets and runtime data
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Codex local configuration
+.codex/
+# Claude Flow runtime data
+# Environment variables
+
+# Agentic tooling local state/artifacts
+.agents/
+.claude-flow/
+.claude/
+.DS_Store
+.mcp.json
+.procoder
+.serena/
+.swarm/
+agent/
+AGENTS.md
+CLAUDE.md
+ruvector.db
+skills-lock.json
