@@ -1,0 +1,44 @@
+# /etc/systemd/system/pr-review-worker.service
+#
+#   install -m 0755 pr-review-worker /usr/local/bin/
+#   install -m 0600 prw.env /etc/pr-review-worker.env
+#   systemctl enable --now pr-review-worker
+#
+# The worker keeps no state outside StateDirectory, so a restart is always safe:
+# queued jobs and the per-PR review budget live in the SQLite file.
+
+[Unit]
+Description=Automated PR review worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pr-review-worker
+EnvironmentFile=/etc/pr-review-worker.env
+Environment=PRW_DB=/var/lib/pr-review-worker/prw.db
+StateDirectory=pr-review-worker
+WorkingDirectory=/var/lib/pr-review-worker
+Restart=always
+RestartSec=5s
+
+# The review CLI runs as a child of this unit; control-group kill makes systemd
+# reap the whole tree, matching the worker's own process-group kill policy.
+KillMode=control-group
+TimeoutStopSec=30s
+
+# Memory ceiling for the box sized in ADR-0001. The review CLI is the heavy
+# part; if it exceeds this the job fails and retries rather than the VM
+# thrashing.
+MemoryMax=3G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

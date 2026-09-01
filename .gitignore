@@ -58,3 +58,11 @@ AGENTS.md
 CLAUDE.md
 ruvector.db
 skills-lock.json
+
+# Build output and local runtime state
+bin/
+coverage.out
+prw.db
+prw.db-wal
+prw.db-shm
+.env
