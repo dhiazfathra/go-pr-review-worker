@@ -40,6 +40,12 @@ func (s Severity) AtLeast(min Severity) bool {
 	return severityRank[s] >= severityRank[min]
 }
 
+// Rank returns s's numeric severity, highest for most severe, for sorting
+// findings by severity.
+func (s Severity) Rank() int {
+	return severityRank[s]
+}
+
 // Finding is one inline review comment anchored to a line of the new file.
 type Finding struct {
 	File     string   `json:"file"`
@@ -160,24 +166,51 @@ func parseResult(out string) (Result, error) {
 	return res, nil
 }
 
-// extractJSON returns the first JSON object in s that is both balanced and
-// valid, trying each opening brace in turn. Prose around the payload often
-// contains a stray brace ("writing to {repo}/out"), so anchoring blindly on
-// the first one would fail the whole pass. String literals are respected so a
-// brace inside a comment body does not confuse the scan.
+// extractJSON returns the last JSON object in s that is both balanced and
+// valid, preferring one that carries a "findings" or "summary" key over a
+// status/telemetry object an agentic CLI may print first. String literals are
+// respected so a brace inside a comment body does not confuse the scan.
 func extractJSON(s string) (string, error) {
 	if !strings.Contains(s, "{") {
 		return "", fmt.Errorf("no json object in engine output (%d bytes)", len(s))
 	}
+
+	var (
+		last             string
+		lastFound        bool
+		lastPayload      string
+		lastPayloadFound bool
+	)
 
 	for start := 0; start < len(s); start++ {
 		if s[start] != '{' {
 			continue
 		}
 
-		if candidate, ok := balancedObject(s, start); ok && json.Valid([]byte(candidate)) {
-			return candidate, nil
+		candidate, ok := balancedObject(s, start)
+		if !ok || !json.Valid([]byte(candidate)) {
+			continue
 		}
+
+		last = candidate
+		lastFound = true
+
+		if strings.Contains(candidate, `"findings"`) || strings.Contains(candidate, `"summary"`) {
+			lastPayload = candidate
+			lastPayloadFound = true
+		}
+
+		// Advance past this object so a brace nested inside it is not also
+		// tried as its own top-level candidate.
+		start += len(candidate) - 1
+	}
+
+	if lastPayloadFound {
+		return lastPayload, nil
+	}
+
+	if lastFound {
+		return last, nil
 	}
 
 	return "", errors.New("unbalanced json object in engine output")

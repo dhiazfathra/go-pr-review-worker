@@ -193,7 +193,9 @@ func (h *Handler) githubJob(r *http.Request, body []byte) (store.Job, error) {
 	var event store.Event
 
 	switch payload.Action {
-	case "opened", "reopened", "ready_for_review":
+	case "reopened":
+		event = store.EventReopened
+	case "opened", "ready_for_review":
 		event = store.EventOpened
 	case "synchronize":
 		event = store.EventSynchronize
@@ -210,11 +212,18 @@ func (h *Handler) githubJob(r *http.Request, body []byte) (store.Job, error) {
 		return store.Job{}, errors.New("payload has no head sha")
 	}
 
+	deliveryID := fmt.Sprintf("github:%s#%d:%s", payload.Repository.FullName, number, payload.PullRequest.Head.SHA)
+	if event == store.EventReopened {
+		// A reopen at the same head SHA as the original "opened" delivery
+		// must not collapse into it, or the reset review never gets enqueued.
+		deliveryID += ":reopened"
+	}
+
 	return store.Job{
 		// Keying on head SHA rather than the delivery UUID makes a GitHub
 		// redelivery (which reuses the UUID) and a duplicate push event
 		// collapse to the same job.
-		DeliveryID: fmt.Sprintf("github:%s#%d:%s", payload.Repository.FullName, number, payload.PullRequest.Head.SHA),
+		DeliveryID: deliveryID,
 		Provider:   "github",
 		Repo:       payload.Repository.FullName,
 		PRNumber:   number,
@@ -257,7 +266,9 @@ func (h *Handler) gitlabJob(r *http.Request, body []byte) (store.Job, error) {
 	var event store.Event
 
 	switch {
-	case attrs.Action == "open" || attrs.Action == "reopen":
+	case attrs.Action == "reopen":
+		event = store.EventReopened
+	case attrs.Action == "open":
 		event = store.EventOpened
 	case attrs.Action == "update" && attrs.OldRev != "":
 		// oldrev is present only when the update pushed new commits; a label
@@ -276,8 +287,13 @@ func (h *Handler) gitlabJob(r *http.Request, body []byte) (store.Job, error) {
 		return store.Job{}, errors.New("payload has no head sha")
 	}
 
+	deliveryID := fmt.Sprintf("gitlab:%s#%d:%s", payload.Project.PathWithNamespace, attrs.IID, head)
+	if event == store.EventReopened {
+		deliveryID += ":reopened"
+	}
+
 	return store.Job{
-		DeliveryID: fmt.Sprintf("gitlab:%s#%d:%s", payload.Project.PathWithNamespace, attrs.IID, head),
+		DeliveryID: deliveryID,
 		Provider:   "gitlab",
 		Repo:       payload.Project.PathWithNamespace,
 		PRNumber:   attrs.IID,

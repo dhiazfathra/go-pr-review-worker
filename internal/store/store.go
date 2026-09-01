@@ -33,6 +33,7 @@ type Event string
 
 const (
 	EventOpened      Event = "opened"
+	EventReopened    Event = "reopened"
 	EventSynchronize Event = "synchronize"
 )
 
@@ -313,6 +314,31 @@ func (s *Store) SavePRState(ctx context.Context, prKey string, st PRState) error
 		now(),
 	); err != nil {
 		return fmt.Errorf("saving pr state %q: %w", prKey, err)
+	}
+
+	return nil
+}
+
+// ResetPRState deletes the review budget and posted-fingerprint history for a
+// PR, so a reopen starts a fresh set of review cycles instead of picking up
+// where the closed PR left off.
+func (s *Store) ResetPRState(ctx context.Context, prKey string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("resetting pr state %q: %w", prKey, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pr_reviews WHERE pr_key = ?`, prKey); err != nil {
+		return fmt.Errorf("resetting pr state %q: %w", prKey, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM posted_comments WHERE pr_key = ?`, prKey); err != nil {
+		return fmt.Errorf("resetting pr state %q: %w", prKey, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("resetting pr state %q: %w", prKey, err)
 	}
 
 	return nil

@@ -88,10 +88,16 @@ func (c *httpClient) do(
 	}
 	defer func() { _ = res.Body.Close() }()
 
-	// Cap the read: a diff on a huge PR must not blow up a 4 GB box.
-	raw, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes))
+	// Cap the read: a diff on a huge PR must not blow up a 4 GB box. Read one
+	// byte past the cap so truncation can be detected and failed loudly
+	// instead of silently reviewing a partial diff.
+	raw, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s %s body: %w", method, path, err)
+	}
+
+	if len(raw) > maxResponseBytes {
+		return nil, fmt.Errorf("%s %s: response exceeds %d byte limit", method, path, maxResponseBytes)
 	}
 
 	if res.StatusCode < 200 || res.StatusCode > 299 {

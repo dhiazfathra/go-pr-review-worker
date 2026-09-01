@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -198,6 +199,12 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 
 	prKey := job.PRKey()
 
+	if job.Event == store.EventReopened {
+		if err := w.store.ResetPRState(ctx, prKey); err != nil {
+			return err
+		}
+	}
+
 	state, err := w.store.PRState(ctx, prKey)
 	if err != nil {
 		return err
@@ -341,6 +348,10 @@ func (w *Worker) postFindings(
 	if err != nil {
 		return nil, nil, err
 	}
+
+	sort.SliceStable(fresh, func(i, j int) bool {
+		return byFingerprint[fresh[i]].Severity.Rank() > byFingerprint[fresh[j]].Severity.Rank()
+	})
 
 	var overCap []string
 
