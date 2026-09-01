@@ -15,11 +15,15 @@ import (
 type GitLab struct {
 	c *httpClient
 
-	// refs memoises the diff-refs triple per merge request revision. Every
-	// inline comment needs it, and without the cache a pass with N findings
-	// makes N extra API calls for an answer that cannot change mid-pass.
-	refsMu sync.Mutex
-	refs   map[string]gitlabDiffRefs
+	// refs memoises the diff-refs triple for the revision currently being
+	// commented on. Every inline comment needs it, and without the memo a pass
+	// with N findings makes N extra metadata calls for an answer that cannot
+	// change mid-pass. It is a single slot rather than a map because the worker
+	// posts for one revision at a time, which also makes it impossible for the
+	// memo to grow over the life of the process.
+	refsMu  sync.Mutex
+	refsKey string
+	refs    gitlabDiffRefs
 }
 
 // NewGitLab returns a GitLab provider. baseURL is the API root, e.g.
@@ -33,7 +37,6 @@ func NewGitLab(baseURL, token string) *GitLab {
 		c: newHTTPClient(baseURL, token, func(t string) (string, string) {
 			return "PRIVATE-TOKEN", t
 		}),
-		refs: map[string]gitlabDiffRefs{},
 	}
 }
 
@@ -176,10 +179,10 @@ func (g *GitLab) diffRefs(ctx context.Context, repo string, iid int, headSHA str
 	key := fmt.Sprintf("%s#%d@%s", repo, iid, headSHA)
 
 	g.refsMu.Lock()
-	cached, ok := g.refs[key]
+	cached, hit := g.refs, g.refsKey == key
 	g.refsMu.Unlock()
 
-	if ok {
+	if hit {
 		return cached, nil
 	}
 
@@ -189,7 +192,7 @@ func (g *GitLab) diffRefs(ctx context.Context, repo string, iid int, headSHA str
 	}
 
 	g.refsMu.Lock()
-	g.refs[key] = mr.DiffRefs
+	g.refsKey, g.refs = key, mr.DiffRefs
 	g.refsMu.Unlock()
 
 	return mr.DiffRefs, nil

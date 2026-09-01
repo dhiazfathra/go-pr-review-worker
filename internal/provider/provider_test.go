@@ -455,4 +455,26 @@ func TestGitLabInlineFetchesDiffRefsOncePerRevision(t *testing.T) {
 	if gets != 2 {
 		t.Fatalf("GETs = %d after a new head sha, want 2", gets)
 	}
+
+	// Review feedback (PR #1, pass 2): the memo must not accumulate one entry
+	// per revision for the life of the process, so the old revision is gone.
+	if err := gl.PostInline(context.Background(), "grp/proj", 4, "h2", provider.InlineComment{
+		Path: "a.go",
+		Line: 1,
+		Body: "problem",
+	}); err != nil {
+		t.Fatalf("PostInline back at the old revision: %v", err)
+	}
+
+	gets = 0
+
+	for _, r := range *log {
+		if r.method == "GET" {
+			gets++
+		}
+	}
+
+	if gets != 3 {
+		t.Fatalf("GETs = %d, want 3: the memo is holding more than the current revision", gets)
+	}
 }

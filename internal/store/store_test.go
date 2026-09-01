@@ -279,3 +279,36 @@ func TestPRKey(t *testing.T) {
 		t.Fatalf("PRKey = %q", got)
 	}
 }
+
+func TestUnseenFingerprintsHandlesEmptyInput(t *testing.T) {
+	st := open(t)
+
+	got, err := st.UnseenFingerprints(t.Context(), "pr", nil)
+	if err != nil {
+		t.Fatalf("UnseenFingerprints: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Fatalf("got = %v, want empty", got)
+	}
+}
+
+func TestUnseenFingerprintsPreservesInputOrder(t *testing.T) {
+	// Review feedback (PR #1, pass 2): the batched query returns rows in the
+	// database's order, so the result has to be rebuilt from the input.
+	st := open(t)
+	ctx := t.Context()
+
+	if err := st.RecordFingerprint(ctx, "pr", "b"); err != nil {
+		t.Fatalf("RecordFingerprint: %v", err)
+	}
+
+	got, err := st.UnseenFingerprints(ctx, "pr", []string{"c", "b", "a"})
+	if err != nil {
+		t.Fatalf("UnseenFingerprints: %v", err)
+	}
+
+	if len(got) != 2 || got[0] != "c" || got[1] != "a" {
+		t.Fatalf("got = %v, want [c a]", got)
+	}
+}

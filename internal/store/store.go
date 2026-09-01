@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: no cgo, keeps the static single binary
@@ -318,23 +319,53 @@ func (s *Store) SavePRState(ctx context.Context, prKey string, st PRState) error
 }
 
 // UnseenFingerprints returns the subset of fingerprints never posted for this
-// PR. It records nothing: a fingerprint must only be marked posted once the
-// provider has actually accepted the comment, otherwise a transient API failure
-// would suppress that finding forever (RecordFingerprint does the marking).
+// PR, in the order given. It records nothing: a fingerprint must only be marked
+// posted once the provider has actually accepted the comment, otherwise a
+// transient API failure would suppress that finding forever (RecordFingerprint
+// does the marking).
 func (s *Store) UnseenFingerprints(ctx context.Context, prKey string, fingerprints []string) ([]string, error) {
+	if len(fingerprints) == 0 {
+		return []string{}, nil
+	}
+
+	// One query for the whole batch: a per-fingerprint round-trip is wasted
+	// work even at the per-pass comment cap.
+	args := make([]any, 0, len(fingerprints)+1)
+	args = append(args, prKey)
+
+	for _, fp := range fingerprints {
+		args = append(args, fp)
+	}
+
+	query := `SELECT fingerprint FROM posted_comments WHERE pr_key = ? AND fingerprint IN (?` +
+		strings.Repeat(", ?", len(fingerprints)-1) + `)`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reading comment fingerprints for %q: %w", prKey, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	seen := make(map[string]struct{}, len(fingerprints))
+
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			return nil, fmt.Errorf("scanning comment fingerprint for %q: %w", prKey, err)
+		}
+
+		seen[fp] = struct{}{}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating comment fingerprints for %q: %w", prKey, err)
+	}
+
 	unseen := make([]string, 0, len(fingerprints))
 
 	for _, fp := range fingerprints {
-		var exists int
-
-		row := s.db.QueryRowContext(ctx,
-			`SELECT 1 FROM posted_comments WHERE pr_key = ? AND fingerprint = ?`, prKey, fp)
-
-		switch err := row.Scan(&exists); {
-		case errors.Is(err, sql.ErrNoRows):
+		if _, ok := seen[fp]; !ok {
 			unseen = append(unseen, fp)
-		case err != nil:
-			return nil, fmt.Errorf("reading comment fingerprints for %q: %w", prKey, err)
 		}
 	}
 
