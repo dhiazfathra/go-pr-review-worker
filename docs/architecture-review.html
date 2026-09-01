@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Architecture review — PR Review Worker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 4 4; }
+      .leak { stroke: #dc2626; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+      <header class="space-y-3">
+        <h1 class="font-serif text-3xl">Architecture review — PR Review Worker</h1>
+        <p class="text-sm text-slate-500">Go · single-worker daemon · claude cli / opencode cli fallback</p>
+        <div class="flex flex-wrap gap-4 text-xs uppercase tracking-wider text-slate-500 pt-2">
+          <span>▭ module</span>
+          <span>┄ seam</span>
+          <span class="text-red-600">→ leakage</span>
+          <span class="font-bold">▉ deep module</span>
+        </div>
+      </header>
+
+      <section id="candidates" class="space-y-10">
+
+        <article class="rounded-lg border border-slate-200 bg-white p-6 space-y-4">
+          <div class="flex items-center justify-between">
+            <h2 class="font-serif text-xl">Webhook intake as a thin adapter</h2>
+            <div class="flex gap-2">
+              <span class="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+              <span class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700">ports & adapters</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-slate-600">internal/webhook/handler.go · internal/webhook/verify.go</p>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <pre class="mermaid">
+sequenceDiagram
+  participant GH as GitHub
+  participant WH as Webhook Handler
+  participant Q as Job Queue (chan, buf=1)
+  participant W as Worker (single goroutine)
+  GH->>WH: PR opened / synchronize
+  WH->>WH: verify signature
+  WH->>Q: enqueue ReviewJob{prID, cycle}
+  Q-->>W: dequeue (blocks if busy)
+  Note over W: only one job in flight, ever
+            </pre>
+          </div>
+
+          <p><span class="font-semibold">Problem:</span> webhook delivery is bursty — GitHub retries, multiple pushes in seconds — and none of that bursts logic should live near HTTP handling.</p>
+          <p><span class="font-semibold">Solution:</span> handler does nothing but verify + enqueue. All ordering, dedup, and cycle-counting logic sits behind the seam, in the worker.</p>
+          <ul class="text-sm space-y-1">
+            <li>• locality: retry/dedup logic lives in one place</li>
+            <li>• interface shrinks: handler is signature-verify + enqueue, nothing else</li>
+          </ul>
+        </article>
+
+        <article class="rounded-lg border border-slate-200 bg-white p-6 space-y-4">
+          <div class="flex items-center justify-between">
+            <h2 class="font-serif text-xl">Deep worker: queue, state, and cycle limit behind one seam</h2>
+            <div class="flex gap-2">
+              <span class="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+              <span class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700">in-process</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-slate-600">internal/worker/worker.go · internal/store/sqlite.go</p>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <pre class="mermaid">
+flowchart LR
+  subgraph Before["Before: cycle logic scattered"]
+    A1[Webhook Handler] --> A2[checks cycle count]
+    A2 --> A3[spawns CLI]
+    A3 --> A4[posts comments]
+    A2 -.leak.-> A5[in-memory map, lost on restart]
+  end
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class A5 leak
+            </pre>
+          </div>
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <pre class="mermaid">
+flowchart LR
+  subgraph After["After: one deep Worker module"]
+    B1[Worker.Run loop]:::deep
+  end
+  classDef deep fill:#0f172a,color:#fff,stroke:#0f172a;
+            </pre>
+          </div>
+
+          <p><span class="font-semibold">Problem:</span> cycle count (max 2 per PR) was tracked in memory in the earlier sketch — a worker restart mid-review silently resets it, so a PR could get a 3rd review.</p>
+          <p><span class="font-semibold">Solution:</span> SQLite table <code class="font-mono text-xs">pr_reviews(pr_id, cycle, status, updated_at)</code> as the single source of truth. Worker reads/writes it; nothing else touches it.</p>
+          <ul class="text-sm space-y-1">
+            <li>• deepen: one interface (<code class="font-mono text-xs">Store.NextCycle(prID)</code>), implementation absorbs locking + persistence</li>
+            <li>• leverage: same interface serves crash recovery and dedup</li>
+          </ul>
+          <div class="border-l-4 border-amber-400 bg-amber-50 text-amber-900 text-sm p-3">
+            ADR: SQLite over Postgres/Redis — single VM, single writer, zero ops overhead; matches your cost-minimal infra stance on [[erp-replatform]] and [[event-tracking-platform]].
+          </div>
+        </article>
+
+        <article class="rounded-lg border border-slate-200 bg-white p-6 space-y-4">
+          <div class="flex items-center justify-between">
+            <h2 class="font-serif text-xl">CLI runner: claude → opencode as a swappable adapter</h2>
+            <div class="flex gap-2">
+              <span class="text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800">Strong</span>
+              <span class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700">local-substitutable</span>
+            </div>
+          </div>
+          <p class="font-mono text-sm text-slate-600">internal/reviewer/runner.go</p>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-4">
+            <pre class="mermaid">
+flowchart TD
+  R[ReviewRunner.Run diff] --> C{claude cli exec}
+  C -->|exit 0| P[Parse output → comments + summary]
+  C -->|rate limited signal| O[opencode cli exec]
+  O -->|exit 0| P
+  O -->|fails too| F[Mark job failed, alert]
+            </pre>
+          </div>
+
+          <p><span class="font-semibold">Problem:</span> if fallback logic is inline in the worker loop, every future engine swap (a 3rd CLI, a hosted API) means editing the worker.</p>
+          <p><span class="font-semibold">Solution:</span> one <code class="font-mono text-xs">ReviewEngine</code> interface, two adapters (claude, opencode). Worker calls the interface, never a specific binary.</p>
+          <ul class="text-sm space-y-1">
+            <li>• two adapters justify the seam: claude in prod, opencode as fallback, mock in tests</li>
+            <li>• locality: rate-limit detection regex/exit-code logic lives only in the claude adapter</li>
+          </ul>
+        </article>
+
+      </section>
+
+      <section id="top-recommendation" class="rounded-lg border-2 border-emerald-600 bg-emerald-50 p-6 space-y-2">
+        <h2 class="font-serif text-xl">Top recommendation: Go, single binary, SQLite-backed worker</h2>
+        <p class="text-sm">Thin webhook adapter, one deep worker owning queue + cycle-state + CLI dispatch, one <code class="font-mono text-xs">ReviewEngine</code> seam for claude/opencode. No Redis, no external queue — a buffered channel plus SQLite covers the "1 worker, 1 job, 2 cycles" constraint entirely in-process. <a href="#candidates" class="underline text-emerald-800">↑ jump to candidates</a></p>
+      </section>
+
+    </main>
+  </body>
+</html>
