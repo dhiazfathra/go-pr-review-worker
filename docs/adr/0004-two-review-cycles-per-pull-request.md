@@ -45,10 +45,12 @@ Suppress the notice entirely with `PRW_ANNOUNCE_BUDGET_EXHAUSTED=false`.
 
 ## Consequences
 
-- Reopening a PR resets the budget: a `reopened`/`reopen` event deletes the
-  PR's `pr_reviews` and `posted_comments` rows before the cycle count is read,
-  so the reopened PR gets a fresh two-pass budget. It can also still be reset
-  manually by deleting the row.
+- Reopening a PR resets the budget: on the first attempt of a `reopened`/
+  `reopen` job, the PR's `pr_reviews` and `posted_comments` rows are deleted
+  before the cycle count is read, so the reopened PR gets a fresh two-pass
+  budget. Retries of that same job (`Attempts > 1`) do not reset again, so a
+  failing reopened job can't wipe an already-refreshed budget on every retry.
+  It can also still be reset manually by deleting the row.
 - The budget is persisted, so a restart mid-review cannot grant a third pass
   ([ADR-0002](0002-sqlite-for-queue-and-review-budget.md)).
 - `PRW_MAX_CYCLES` exists for other deployments, but 2 is the specified default.
