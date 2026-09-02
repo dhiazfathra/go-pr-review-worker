@@ -64,10 +64,14 @@ Connection settings: `journal_mode=WAL`, `busy_timeout=5000`,
   nicety:
 
   ```sh
-  sqlite3 prw.db "VACUUM INTO 'backup-$(date -u +%Y%m%dT%H%M%SZ).db'"
+  sqlite3 /var/lib/pr-review-worker/prw.db \
+    "VACUUM INTO '/var/lib/pr-review-worker/backup-$(date -u +%Y%m%dT%H%M%SZ).db'"
   ```
 
-  Inspection is `sqlite3 prw.db`.
+  Inspection is `sqlite3 /var/lib/pr-review-worker/prw.db`. Both paths are
+  absolute deliberately: `deploy/pr-review-worker.service` sets
+  `PRW_DB=/var/lib/pr-review-worker/prw.db`, so a relative `prw.db` run from
+  anywhere else either fails or quietly opens a different, empty database.
 
 - The queue is polled rather than pushed, so a lost notification degrades
   latency, not correctness.

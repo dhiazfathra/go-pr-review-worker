@@ -16,8 +16,19 @@ var _ ThreadReviewer = (*GitHub)(nil)
 // Resolving a thread is a GraphQL-only mutation on GitHub, and the thread's
 // node id comes back only from GraphQL, so reading the threads has to happen
 // here too rather than over REST.
+// `viewer` is the account the token belongs to, asked for in the same round
+// trip: thread ownership is decided by who wrote the first comment, not by a
+// marker in its body, which anyone can paste.
+//
+// The comments come back as two windows rather than one `comments(first:100)`.
+// A connection returns at most 100 nodes per request, so a single window loses
+// whichever end it is not anchored to — and both ends matter here: the first
+// comment is the finding, and the newest ones are the author's replies, which
+// are the evidence. `opening` pins the finding, `latest` pins the replies. A
+// thread over 101 comments long loses its middle, which no verdict depends on.
 const reviewThreadsQuery = `
 query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
+  viewer { login }
   repository(owner:$owner,name:$name) {
     pullRequest(number:$number) {
       reviewThreads(first:100,after:$cursor) {
@@ -28,7 +39,10 @@ query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
           line
           originalLine
           isResolved
-          comments(first:100) {
+          opening: comments(first:1) {
+            nodes { databaseId author { login } body }
+          }
+          latest: comments(last:100) {
             nodes { databaseId author { login } body }
           }
         }
@@ -113,8 +127,21 @@ func (g *GitHub) ReviewThreads(ctx context.Context, repo string, number int) ([]
 		cursor *string
 	)
 
+	type commentWindow struct {
+		Nodes []struct {
+			DatabaseID int64 `json:"databaseId"`
+			Author     struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			Body string `json:"body"`
+		} `json:"nodes"`
+	}
+
 	for page := 0; page < maxListPages; page++ {
 		var res struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
 			Repository struct {
 				PullRequest struct {
 					ReviewThreads struct {
@@ -123,20 +150,13 @@ func (g *GitHub) ReviewThreads(ctx context.Context, repo string, number int) ([]
 							EndCursor   string `json:"endCursor"`
 						} `json:"pageInfo"`
 						Nodes []struct {
-							ID           string `json:"id"`
-							Path         string `json:"path"`
-							Line         *int   `json:"line"`
-							OriginalLine *int   `json:"originalLine"`
-							IsResolved   bool   `json:"isResolved"`
-							Comments     struct {
-								Nodes []struct {
-									DatabaseID int64 `json:"databaseId"`
-									Author     struct {
-										Login string `json:"login"`
-									} `json:"author"`
-									Body string `json:"body"`
-								} `json:"nodes"`
-							} `json:"comments"`
+							ID           string        `json:"id"`
+							Path         string        `json:"path"`
+							Line         *int          `json:"line"`
+							OriginalLine *int          `json:"originalLine"`
+							IsResolved   bool          `json:"isResolved"`
+							Opening      commentWindow `json:"opening"`
+							Latest       commentWindow `json:"latest"`
 						} `json:"nodes"`
 					} `json:"reviewThreads"`
 				} `json:"pullRequest"`
@@ -171,26 +191,45 @@ func (g *GitHub) ReviewThreads(ctx context.Context, repo string, number int) ([]
 				t.Line = *n.OriginalLine
 			}
 
-			for _, c := range n.Comments.Nodes {
-				t.Comments = append(t.Comments, ThreadComment{
-					ID:     fmt.Sprintf("%d", c.DatabaseID),
-					Author: c.Author.Login,
-					Body:   c.Body,
-				})
+			seen := make(map[int64]bool, len(n.Latest.Nodes)+1)
+
+			for _, w := range []commentWindow{n.Opening, n.Latest} {
+				for _, c := range w.Nodes {
+					// The windows overlap on short threads, where `last:100`
+					// includes the opening comment.
+					if seen[c.DatabaseID] {
+						continue
+					}
+
+					seen[c.DatabaseID] = true
+
+					t.Comments = append(t.Comments, ThreadComment{
+						ID:     fmt.Sprintf("%d", c.DatabaseID),
+						Author: c.Author.Login,
+						Body:   c.Body,
+					})
+				}
+			}
+
+			if len(t.Comments) > 0 && res.Viewer.Login != "" {
+				t.StartedByWorker = t.Comments[0].Author == res.Viewer.Login
 			}
 
 			out = append(out, t)
 		}
 
 		if !threads.PageInfo.HasNextPage {
-			break
+			return out, nil
 		}
 
 		next := threads.PageInfo.EndCursor
 		cursor = &next
 	}
 
-	return out, nil
+	// Falling out of the loop means the forge still had pages. A truncated
+	// thread list would let the follow-up pass approve a pull request while
+	// unread findings sat on a page it never asked for.
+	return nil, fmt.Errorf("%w: review threads on %s#%d", ErrTooManyResults, repo, number)
 }
 
 // ReplyToThread implements ThreadReviewer. GitHub's REST reply endpoint takes

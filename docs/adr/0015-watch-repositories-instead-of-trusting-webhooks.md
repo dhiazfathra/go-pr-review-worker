@@ -102,3 +102,8 @@ the author asks for an opinion wastes it.
   does not remove it.
 - Startup now fails when `PRW_WATCH_REPOS` names a forge whose credentials are
   missing, rather than logging a failed poll every interval forever.
+- A repository with more open pull requests than the paging cap allows makes
+  the sweep **fail loudly** (`provider.ErrTooManyResults`) instead of
+  returning a truncated list. A truncated list looks exactly like a complete
+  one, so everything past the cap would go unreviewed with no signal — the
+  same silent gap this ADR exists to close.

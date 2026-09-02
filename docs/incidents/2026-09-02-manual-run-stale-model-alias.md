@@ -1,4 +1,4 @@
-## Postmortem: Manual worker run against PR #111 posted a false "review failed" comment
+# Postmortem: Manual worker run against PR #111 posted a false "review failed" comment
 
 **Date:** 2026-09-02 | **Duration:** ~7 minutes | **Severity:** SEV4
 **Authors:** Dhiaz Fathra | **Status:** Resolved

@@ -167,6 +167,64 @@ func TestWatcherDoesNotDuplicateAWebhookDelivery(t *testing.T) {
 			first.ID, second.ID,
 		)
 	}
+
+	// Two claims returning the same id is necessary but not sufficient: a
+	// duplicate row could exist behind the one being re-served. The queue
+	// depth is the direct assertion.
+	n, err := st.PendingCount(context.Background())
+	if err != nil {
+		t.Fatalf("PendingCount: %v", err)
+	}
+
+	if n != 1 {
+		t.Fatalf("pending jobs = %d, want exactly the webhook's one row", n)
+	}
+}
+
+// A sweep that gave up on the first failing target would leave every
+// repository after it unwatched, which is invisible: an unreviewed PR looks
+// exactly like one whose review found nothing.
+func TestWatcherSweepsLaterTargetsAfterOneFails(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "twotargets.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	t.Cleanup(func() { _ = st.Close() })
+
+	broken := &fakeProvider{openPRErr: errors.New("token revoked")}
+	working := &fakeProvider{openPRs: []provider.OpenPullRequest{
+		{Number: 7, HeadSHA: "head7", BaseSHA: "base7"},
+	}}
+
+	w := worker.NewWatcher(
+		st,
+		map[string]provider.Provider{"github": broken, "gitlab": working},
+		[]worker.WatchTarget{
+			{Provider: "github", Repo: "o/broken"},
+			{Provider: "gitlab", Repo: "g/working"},
+		},
+		make(chan struct{}, 1),
+		time.Hour,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	if err := w.Sweep(context.Background()); err == nil {
+		t.Fatal("Sweep err = nil, want the first target's failure surfaced")
+	}
+
+	if got := working.listedRepos(); len(got) != 1 || got[0] != "g/working" {
+		t.Fatalf("second target listed %v, want it reached despite the first failing", got)
+	}
+
+	job, err := st.ClaimNext(context.Background())
+	if err != nil {
+		t.Fatalf("ClaimNext: %v", err)
+	}
+
+	if job.Repo != "g/working" || job.PRNumber != 7 {
+		t.Fatalf("job = %s#%d, want the second target's PR enqueued", job.Repo, job.PRNumber)
+	}
 }
 
 func TestWatcherKeepsGoingWhenOneRepositoryFails(t *testing.T) {

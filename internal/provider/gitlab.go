@@ -132,11 +132,14 @@ func (g *GitLab) ListOpenPullRequests(ctx context.Context, repo string) ([]OpenP
 		}
 
 		if len(payload) < 100 {
-			break
+			return out, nil
 		}
 	}
 
-	return out, nil
+	// See the GitHub implementation: a full last page means the cap hid open
+	// merge requests, and reporting the list as complete would hide them for
+	// good.
+	return nil, fmt.Errorf("%w: open merge requests on %s", ErrTooManyResults, repo)
 }
 
 // PullRequest implements Provider.

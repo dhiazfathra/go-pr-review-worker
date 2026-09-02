@@ -238,18 +238,23 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 	if state.Cycle >= w.cfg.MaxCycles {
 		approved := w.approve(ctx, job, prov, state, verified, 0, log)
 
-		if verified.Ran {
-			// The follow-up is this pass's whole contribution; recording the
-			// head keeps the next push from re-verifying the same threads.
-			state.LastReviewedSHA = job.HeadSHA
-			state.Approved = state.Approved || approved
-
-			if err := w.store.SavePRState(ctx, prKey, state); err != nil {
-				return err
-			}
+		// The notice goes first. Recording the head before it is posted would
+		// make the retry of a failed notice exit early as "head already
+		// reviewed", so the author would never be told the budget is spent.
+		if err := w.handleExhausted(ctx, job, prov, state, log); err != nil {
+			return err
 		}
 
-		return w.handleExhausted(ctx, job, prov, state, log)
+		if !verified.Ran {
+			return nil
+		}
+
+		// The follow-up is this pass's whole contribution; recording the head
+		// keeps the next push from re-verifying the same threads.
+		state.LastReviewedSHA = job.HeadSHA
+		state.Approved = state.Approved || approved
+
+		return w.store.SavePRState(ctx, prKey, state)
 	}
 
 	cycle := state.Cycle + 1

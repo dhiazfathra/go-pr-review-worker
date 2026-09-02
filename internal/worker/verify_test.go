@@ -3,6 +3,7 @@ package worker_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -117,10 +118,13 @@ func (e *verifyingEngine) askedWith() []reviewer.VerifyRequest {
 
 func workerThread(id, path string, resolved bool, replies ...string) provider.ReviewThread {
 	t := provider.ReviewThread{
-		ID:       id,
-		Path:     path,
-		Line:     30,
-		Resolved: resolved,
+		ID:   id,
+		Path: path,
+		Line: 30,
+		// The forge reports the first comment as written by the worker's own
+		// account; without that the thread is not the worker's to resolve.
+		StartedByWorker: true,
+		Resolved:        resolved,
 		Comments: []provider.ThreadComment{
 			{ID: "c-" + id, Author: "pr-review-worker", Body: marker + "\n\n**🟠 major** — original finding"},
 		},
@@ -223,7 +227,19 @@ func newThreadProvider(threads ...provider.ReviewThread) *threadProvider {
 	p := &threadProvider{threads: threads}
 	p.pr = provider.PullRequest{Title: "Add trace id", Body: "desc", HeadSHA: "sha2"}
 	p.fullDiff = "@@ full @@"
-	p.compareDiff = "@@ delta @@"
+
+	// The delta diff has to name every thread's file: resolving a thread
+	// requires the diff to have touched the file the finding sits on, so a
+	// fixture with a placeholder diff would make every verdict unresolvable.
+	var b strings.Builder
+
+	b.WriteString("@@ delta @@\n")
+
+	for _, t := range threads {
+		fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n", t.Path, t.Path)
+	}
+
+	p.compareDiff = b.String()
 
 	return p
 }
@@ -332,8 +348,12 @@ func TestVerifyPassesRepliesAndTheDeltaDiffToTheEngine(t *testing.T) {
 	}
 
 	req := asked[0]
-	if req.Diff != "@@ delta @@" {
+	if req.Diff != prov.compareDiff {
 		t.Errorf("Diff = %q, want the diff since the reviewed commit", req.Diff)
+	}
+
+	if !strings.HasPrefix(req.Diff, "@@ delta @@") {
+		t.Errorf("Diff = %q, want the compare diff rather than the full one", req.Diff)
 	}
 
 	if len(req.Threads) != 1 || len(req.Threads[0].Replies) != 1 {
@@ -447,6 +467,74 @@ func TestUnresolvableThreadIsNotCountedAsFixed(t *testing.T) {
 	_, _, approvals := prov.snapshot()
 	if len(approvals) != 0 {
 		t.Fatalf("approved despite a thread that could not be resolved: %v", approvals)
+	}
+}
+
+// The marker is text in a comment body, so anyone can paste one. Ownership has
+// to come from the forge's own view of who wrote the comment, or a human could
+// open a thread that the worker would then adopt and resolve.
+func TestAThreadCarryingTheMarkerButWrittenByAHumanIsIgnored(t *testing.T) {
+	thread := workerThread("T1", "a.ts", false, "Fixed")
+	thread.StartedByWorker = false
+	thread.Comments[0].Author = "impostor"
+
+	prov := newThreadProvider(thread)
+
+	engine := &verifyingEngine{
+		scriptedEngine: scriptedEngine{results: []reviewer.Result{{Summary: "pass 2"}}},
+		verdicts:       []reviewer.ThreadVerdict{{ID: "T1", Verdict: reviewer.VerdictFixed}},
+	}
+
+	st, w := verifyFixture(t, worker.Config{
+		VerifyReplies:       true,
+		ApproveWhenResolved: true,
+	}, engine, prov)
+
+	runJob(t, st, w)
+
+	if got := engine.askedWith(); len(got) != 0 {
+		t.Fatalf("Verify ran on a thread the worker did not write: %+v", got)
+	}
+
+	resolved, _, approvals := prov.snapshot()
+	if len(resolved) != 0 {
+		t.Errorf("resolved %v, want nothing: the thread is not the worker's", resolved)
+	}
+
+	if len(approvals) != 0 {
+		t.Errorf("approved off the back of a thread it does not own: %v", approvals)
+	}
+}
+
+// The engine reads the diff and the replies, both of which the PR author
+// controls, so a `fixed` verdict is not authority on its own. If the commits
+// since the last review never touched the file, nothing on it can be fixed.
+func TestAFixedVerdictForAFileTheDiffDoesNotTouchIsIgnored(t *testing.T) {
+	prov := newThreadProvider(workerThread("T1", "untouched.ts", false, "Fixed, honest"))
+
+	// Overwrite the fixture's diff so it names a different file than the
+	// thread's: this is the shape of an injected verdict.
+	prov.compareDiff = "@@ delta @@\n--- a/other.ts\n+++ b/other.ts\n"
+
+	engine := &verifyingEngine{
+		scriptedEngine: scriptedEngine{results: []reviewer.Result{{Summary: "pass 2"}}},
+		verdicts:       []reviewer.ThreadVerdict{{ID: "T1", Verdict: reviewer.VerdictFixed}},
+	}
+
+	st, w := verifyFixture(t, worker.Config{
+		VerifyReplies:       true,
+		ApproveWhenResolved: true,
+	}, engine, prov)
+
+	runJob(t, st, w)
+
+	resolved, _, approvals := prov.snapshot()
+	if len(resolved) != 0 {
+		t.Errorf("resolved %v on a file the diff never touched", resolved)
+	}
+
+	if len(approvals) != 0 {
+		t.Errorf("approved with the thread still open: %v", approvals)
 	}
 }
 

@@ -43,11 +43,23 @@ pass on every job:
      reason, so the author gets a specific objection rather than silence.
    - `unrelated` → touch nothing. No evidence is not a verdict.
 
-Four rules make the asymmetry explicit in the code rather than only in the
+Six rules make the asymmetry explicit in the code rather than only in the
 prompt:
 
 - A verdict naming a thread that was not asked about is **dropped**
   (`parseVerifyResult`), so a hallucinated id can never resolve a real thread.
+- A `fixed` verdict for a **file the diff does not touch** is refused. The
+  engine reads the diff and the replies, both written by the pull request's
+  author, so a verdict is not authority on its own — an instruction smuggled
+  into either could ask for one. The forge's own list of changed files is
+  deterministic: if the commits since the last review never touched the file
+  the finding sits on, nothing there can have been fixed. This does not catch
+  a genuinely misjudged change, but it does mean closing a finding always
+  requires a matching code change to exist.
+- Thread ownership comes from the **forge's view of who wrote the first
+  comment** (`viewer.login`), not from the marker in its body. A marker is
+  text anyone can paste; on its own it would let a human open a thread that
+  the worker then adopts and resolves.
 - An **unrecognised** verdict string is downgraded to `unrelated`, not guessed
   at — a typo must never read as `fixed`.
 - A thread whose `resolveReviewThread` call **fails** stays counted as open, so

@@ -95,6 +95,7 @@ func (w *Worker) verify(
 	}
 
 	out := verifyOutcome{Considered: len(open), Ran: true}
+	touched := changedPaths(diff)
 
 	for _, v := range res.Verdicts {
 		t, ok := byID[v.ID]
@@ -103,6 +104,24 @@ func (w *Worker) verify(
 		}
 
 		if v.Verdict == reviewer.VerdictFixed {
+			// The engine reads text the pull request's author controls — the
+			// diff and the replies — so a `fixed` verdict is not authority on
+			// its own; an instruction smuggled into either could ask for one.
+			// The forge's own file list is the deterministic check: if the
+			// commits since the last review never touched the file the finding
+			// is on, nothing there can have been fixed, whatever the verdict
+			// says. This cannot catch a misjudged real change, but it does
+			// mean closing a finding always requires a matching code change.
+			if !touched[t.Path] {
+				log.Warn(
+					"ignoring a fixed verdict for a file the diff does not touch",
+					"thread", t.ID,
+					"path", t.Path,
+				)
+
+				continue
+			}
+
 			if err := tr.ResolveThread(ctx, t.ID); err != nil {
 				// A thread that cannot be resolved is left open rather than
 				// reported as fixed; the next pass will try again.
@@ -146,6 +165,30 @@ func (w *Worker) verify(
 	return out, nil
 }
 
+// changedPaths reads the file names out of a unified diff. It takes them from
+// the `+++ b/path` lines rather than the `diff --git` header, because that is
+// the post-image name — the one a review comment is anchored to.
+func changedPaths(diff string) map[string]bool {
+	paths := make(map[string]bool)
+
+	for _, line := range strings.Split(diff, "\n") {
+		if !strings.HasPrefix(line, "+++ ") {
+			continue
+		}
+
+		p := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
+
+		// /dev/null is a deletion, which has no post-image path.
+		if p == "/dev/null" {
+			continue
+		}
+
+		paths[strings.TrimPrefix(p, "b/")] = true
+	}
+
+	return paths
+}
+
 // openWorkerThreads selects the unresolved threads this worker started and
 // renders them for the engine. A thread opened by a human is not the worker's
 // to resolve, and one already resolved needs no verdict.
@@ -158,7 +201,11 @@ func openWorkerThreads(threads []provider.ReviewThread) ([]reviewer.OpenThread, 
 			continue
 		}
 
-		if !strings.Contains(t.Comments[0].Body, summaryMarker) {
+		// Both conditions are needed. The marker says the comment came from a
+		// worker; the forge's authorship says it came from *this* account. A
+		// marker is just text in a body, so anyone could open a thread the
+		// worker would then treat as its own and resolve.
+		if !t.StartedByWorker || !strings.Contains(t.Comments[0].Body, summaryMarker) {
 			continue
 		}
 

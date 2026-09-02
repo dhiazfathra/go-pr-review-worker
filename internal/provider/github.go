@@ -125,11 +125,14 @@ func (g *GitHub) ListOpenPullRequests(ctx context.Context, repo string) ([]OpenP
 		}
 
 		if len(payload) < 100 {
-			break
+			return out, nil
 		}
 	}
 
-	return out, nil
+	// The last allowed page was full, so there are more open pull requests
+	// than the cap admits. Returning the truncated list would leave the
+	// watcher permanently blind to everything past it, with no signal.
+	return nil, fmt.Errorf("%w: open pull requests on %s", ErrTooManyResults, repo)
 }
 
 // maxListPages bounds pagination so a pathological repository cannot make one

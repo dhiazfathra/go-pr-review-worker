@@ -38,6 +38,7 @@ type fakeProvider struct {
 	compareCalls   [][2]string
 	fullDiffCalls  int
 	listCalls      int
+	listedFor      []string
 	postSummaryErr error
 }
 
@@ -47,17 +48,27 @@ func (f *fakeProvider) PullRequest(context.Context, string, int) (provider.PullR
 	return f.pr, nil
 }
 
-func (f *fakeProvider) ListOpenPullRequests(context.Context, string) ([]provider.OpenPullRequest, error) {
+func (f *fakeProvider) ListOpenPullRequests(_ context.Context, repo string) ([]provider.OpenPullRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.listCalls++
+	f.listedFor = append(f.listedFor, repo)
 
 	if f.openPRErr != nil {
 		return nil, f.openPRErr
 	}
 
 	return f.openPRs, nil
+}
+
+// listedRepos reports which repositories were actually asked about, so a test
+// can tell "the sweep reached this target" from "the sweep returned early".
+func (f *fakeProvider) listedRepos() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]string(nil), f.listedFor...)
 }
 
 func (f *fakeProvider) Diff(context.Context, string, int) (string, error) {

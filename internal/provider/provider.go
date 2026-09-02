@@ -55,7 +55,18 @@ type ReviewThread struct {
 	Line     int
 	Resolved bool
 	Comments []ThreadComment
+	// StartedByWorker reports that the thread's first comment was written by
+	// the account the worker is authenticated as. A marker in the body cannot
+	// establish that — anyone can paste one — so ownership is decided by the
+	// forge's own view of who wrote the comment.
+	StartedByWorker bool
 }
+
+// ErrTooManyResults is returned by a list call whose paging cap was reached
+// while the forge still had more to give. Returning the truncated list as if
+// it were complete would make the watcher silently ignore every pull request
+// past the cap.
+var ErrTooManyResults = errors.New("provider: more results than the page limit allows")
 
 // Provider is a forge the worker can read diffs from and post reviews to.
 type Provider interface {

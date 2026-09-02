@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -33,15 +34,17 @@ func TestGitHubListOpenPullRequestsSkipsDrafts(t *testing.T) {
 
 func TestGitHubReviewThreadsReadsCommentsAndResolution(t *testing.T) {
 	srv, _ := server(t, map[string]string{
-		"POST /graphql": `{"data":{"repository":{"pullRequest":{"reviewThreads":{
+		"POST /graphql": `{"data":{"viewer":{"login":"bot"},"repository":{"pullRequest":{"reviewThreads":{
 		  "pageInfo":{"hasNextPage":false,"endCursor":""},
 		  "nodes":[
 		    {"id":"T1","path":"a.ts","line":30,"originalLine":28,"isResolved":false,
-		     "comments":{"nodes":[
+		     "opening":{"nodes":[{"databaseId":11,"author":{"login":"bot"},"body":"finding"}]},
+		     "latest":{"nodes":[
 		       {"databaseId":11,"author":{"login":"bot"},"body":"finding"},
 		       {"databaseId":12,"author":{"login":"dev"},"body":"fixed in abc"}]}},
 		    {"id":"T2","path":"b.ts","line":null,"originalLine":9,"isResolved":true,
-		     "comments":{"nodes":[{"databaseId":21,"author":{"login":"bot"},"body":"other"}]}}
+		     "opening":{"nodes":[{"databaseId":21,"author":{"login":"dev"},"body":"other"}]},
+		     "latest":{"nodes":[{"databaseId":21,"author":{"login":"dev"},"body":"other"}]}}
 		  ]}}}}}`,
 	})
 	defer srv.Close()
@@ -71,6 +74,38 @@ func TestGitHubReviewThreadsReadsCommentsAndResolution(t *testing.T) {
 
 	if !got[1].Resolved {
 		t.Error("thread 2 should be reported resolved")
+	}
+
+	// The two comment windows overlap on a short thread; the opening comment
+	// must appear once, and first.
+	if got[0].Comments[0].Body != "finding" {
+		t.Errorf("thread 1 first comment = %q, want the finding", got[0].Comments[0].Body)
+	}
+
+	// Ownership comes from viewer.login, not from anything in the body: T1's
+	// opening comment is the viewer's, T2's is a human's.
+	if !got[0].StartedByWorker {
+		t.Error("thread 1 opened by the viewer should be marked as the worker's")
+	}
+
+	if got[1].StartedByWorker {
+		t.Error("thread 2 opened by another account must not be marked as the worker's")
+	}
+}
+
+// A truncated thread list would let the follow-up pass approve a PR while
+// unread findings sat on a page it never fetched, so the cap is an error.
+func TestGitHubReviewThreadsRefusesToTruncate(t *testing.T) {
+	srv, _ := server(t, map[string]string{
+		"POST /graphql": `{"data":{"viewer":{"login":"bot"},"repository":{"pullRequest":{"reviewThreads":{
+		  "pageInfo":{"hasNextPage":true,"endCursor":"c1"},
+		  "nodes":[]}}}}}`,
+	})
+	defer srv.Close()
+
+	_, err := provider.NewGitHub(srv.URL, "tok").ReviewThreads(context.Background(), "o/r", 7)
+	if !errors.Is(err, provider.ErrTooManyResults) {
+		t.Fatalf("err = %v, want ErrTooManyResults", err)
 	}
 }
 
