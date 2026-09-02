@@ -502,7 +502,7 @@ func TestAThreadCarryingTheMarkerButWrittenByAHumanIsIgnored(t *testing.T) {
 	}
 
 	if len(approvals) != 0 {
-		t.Errorf("approved off the back of a thread it does not own: %v", approvals)
+		t.Errorf("approved over an open thread it does not own: %v", approvals)
 	}
 }
 
@@ -545,7 +545,12 @@ func TestAFixedVerdictForAFileTheDiffDoesNotTouchIsIgnored(t *testing.T) {
 // failed when it did not.
 func TestARefusedApprovalLeavesTheJobSuccessful(t *testing.T) {
 	prov := newThreadProvider(workerThread("T1", "a.ts", false, "Fixed"))
-	prov.approveErr = errors.New("422 Can not approve your own pull request")
+	prov.approveErr = &provider.StatusError{
+		Method: "POST",
+		Path:   "/repos/o/r/pulls/7/reviews",
+		Code:   422,
+		Body:   `{"errors":["Review Can not approve your own pull request"]}`,
+	}
 
 	engine := &verifyingEngine{
 		scriptedEngine: scriptedEngine{results: []reviewer.Result{{Summary: "pass 2"}}},
@@ -577,6 +582,92 @@ func TestARefusedApprovalLeavesTheJobSuccessful(t *testing.T) {
 
 	if state.Approved {
 		t.Error("PR marked approved after the forge refused the approval")
+	}
+}
+
+// A transient approval failure is a different thing from a refusal: nothing
+// about a 503 says the approval is disallowed, so it must be treated as a job
+// failure and retried rather than recorded as "permanently unapproved".
+func TestATransientApprovalFailureFailsTheJob(t *testing.T) {
+	prov := newThreadProvider(workerThread("T1", "a.ts", false, "Fixed"))
+	prov.approveErr = &provider.StatusError{
+		Method: "POST",
+		Path:   "/repos/o/r/pulls/7/reviews",
+		Code:   503,
+		Body:   "upstream unavailable",
+	}
+
+	engine := &verifyingEngine{
+		scriptedEngine: scriptedEngine{results: []reviewer.Result{
+			{Summary: "pass 2"},
+			{Summary: "pass 2 retry"},
+		}},
+		verdicts: []reviewer.ThreadVerdict{{ID: "T1", Verdict: reviewer.VerdictFixed}},
+	}
+
+	// MaxAttempts 1 makes the first failure terminal, so the queue still
+	// drains and the outcome is observable as a dead job rather than a
+	// permanently spinning retry.
+	st, w := verifyFixture(t, worker.Config{
+		VerifyReplies:       true,
+		ApproveWhenResolved: true,
+		MaxAttempts:         1,
+		RetryDelay:          time.Millisecond,
+	}, engine, prov)
+
+	runJob(t, st, w)
+
+	if _, _, approvals := prov.snapshot(); len(approvals) != 0 {
+		t.Errorf("recorded an approval that never succeeded: %v", approvals)
+	}
+
+	// A dead-lettered job is the proof the error propagated. A permanent
+	// refusal takes the other branch and leaves the job successful
+	// (TestARefusedApprovalLeavesTheJobSuccessful).
+	notices := prov.summaryBodies()
+
+	var failed bool
+
+	for _, n := range notices {
+		if strings.Contains(n, "Automated review failed") {
+			failed = true
+		}
+	}
+
+	if !failed {
+		t.Errorf("job completed successfully; a 503 approval must fail it. summaries: %v", notices)
+	}
+}
+
+// A finding on a file the follow-up commits deleted or renamed is fixed by
+// definition, but the thread still carries the old path. Reading only the
+// post-image side of the diff made both look untouched, so the correct verdict
+// was discarded and the thread stayed open forever.
+func TestAFixedVerdictIsAcceptedWhenTheFileWasDeletedOrRenamed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		diff string
+	}{
+		{"deleted", "@@ delta @@\n--- a/gone.ts\n+++ /dev/null\n"},
+		{"renamed", "@@ delta @@\n--- a/gone.ts\n+++ b/renamed.ts\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := newThreadProvider(workerThread("T1", "gone.ts", false, "Deleted it"))
+			prov.compareDiff = tc.diff
+
+			engine := &verifyingEngine{
+				scriptedEngine: scriptedEngine{results: []reviewer.Result{{Summary: "pass 2"}}},
+				verdicts:       []reviewer.ThreadVerdict{{ID: "T1", Verdict: reviewer.VerdictFixed}},
+			}
+
+			st, w := verifyFixture(t, worker.Config{VerifyReplies: true}, engine, prov)
+			runJob(t, st, w)
+
+			resolved, _, _ := prov.snapshot()
+			if len(resolved) != 1 || resolved[0] != "T1" {
+				t.Fatalf("resolved = %v, want T1: the diff does touch its path", resolved)
+			}
+		})
 	}
 }
 

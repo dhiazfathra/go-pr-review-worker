@@ -38,7 +38,7 @@ because GitHub is enabled by having both a token and a secret.
 
 The watcher's first sweep, 0.4s after startup:
 
-```
+```text
 {"level":"INFO","msg":"watching repositories","count":1,"interval":"20s"}
 {"level":"INFO","msg":"job enqueued by watcher","delivery":"github:dhiazfathra/prw-sandbox#1:570c88c5bc57b97f92dba711c1bbd5b6c6a4976a","pr":"github:dhiazfathra/prw-sandbox#1","event":"opened","head":"570c88c5bc57b97f92dba711c1bbd5b6c6a4976a"}
 {"level":"INFO","msg":"engine finished","job":1,"engine":"claude","findings":4}
@@ -54,7 +54,7 @@ against a SHA it never reviewed.
 
 After a fix commit was pushed (`a3aa296`), with no webhook involved:
 
-```
+```text
 {"level":"INFO","msg":"job enqueued by watcher","delivery":"github:dhiazfathra/prw-sandbox#1:a3aa296aa9af593ecd8258278c929919d6270c76","event":"synchronize","head":"a3aa296aa9af593ecd8258278c929919d6270c76"}
 ```
 
@@ -69,7 +69,7 @@ queue (ADR-0015 property 2), so a quiet repository costs one
 
 ## The delivery id is the webhook path's id
 
-```
+```text
 github:dhiazfathra/prw-sandbox#1:570c88c5bc57b97f92dba711c1bbd5b6c6a4976a
 ```
 

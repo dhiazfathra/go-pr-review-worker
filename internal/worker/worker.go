@@ -236,12 +236,15 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 	}
 
 	if state.Cycle >= w.cfg.MaxCycles {
-		approved := w.approve(ctx, job, prov, state, verified, 0, log)
+		approved, err := w.approve(ctx, job, prov, state, verified, 0, log)
+		if err != nil {
+			return err
+		}
 
 		// The notice goes first. Recording the head before it is posted would
 		// make the retry of a failed notice exit early as "head already
 		// reviewed", so the author would never be told the budget is spent.
-		if err := w.handleExhausted(ctx, job, prov, state, log); err != nil {
+		if err := w.handleExhausted(ctx, job, prov, &state, log); err != nil {
 			return err
 		}
 
@@ -308,7 +311,10 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 	state.Cycle = cycle
 	state.LastReviewedSHA = job.HeadSHA
 
-	approved := w.approve(ctx, job, prov, state, verified, len(posted)+len(unposted), log)
+	approved, err := w.approve(ctx, job, prov, state, verified, len(posted)+len(unposted), log)
+	if err != nil {
+		return err
+	}
 
 	state.Approved = state.Approved || approved
 
@@ -465,11 +471,18 @@ func (w *Worker) postSummary(
 // handleExhausted deals with a push after the review budget is spent: one note,
 // once, then silence. Repeating it on every push would be noise, and saying
 // nothing at all leaves the author waiting for a review that never comes.
+// handleExhausted posts the one budget notice a pull request gets, if it has
+// not had it yet.
+//
+// state is a pointer because the caller may save it again afterwards: taking a
+// copy here meant `BudgetNoticePosted = true` was written to the database and
+// then immediately overwritten with the caller's stale `false`, so the notice
+// reposted on every later push instead of once.
 func (w *Worker) handleExhausted(
 	ctx context.Context,
 	job store.Job,
 	prov provider.Provider,
-	state store.PRState,
+	state *store.PRState,
 	log *slog.Logger,
 ) error {
 	if !w.cfg.AnnounceBudgetExhausted || state.BudgetNoticePosted {
@@ -491,7 +504,7 @@ func (w *Worker) handleExhausted(
 
 	state.BudgetNoticePosted = true
 
-	return w.store.SavePRState(ctx, job.PRKey(), state)
+	return w.store.SavePRState(ctx, job.PRKey(), *state)
 }
 
 // reportFailure tells the PR author that the review will not arrive. A silent

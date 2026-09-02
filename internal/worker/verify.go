@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -21,8 +22,12 @@ type verifyOutcome struct {
 	// Open is how many remain unresolved after the pass.
 	Open int
 	// Ran reports whether the pass actually happened; false means it was
-	// skipped (disabled, unsupported provider, or nothing to check).
+	// skipped (disabled, unsupported provider, or no prior reviewed commit).
 	Ran bool
+	// ForeignOpen is how many unresolved threads belong to somebody else. The
+	// worker never touches them, but it must not approve over the top of them
+	// either: a human objection is still an objection.
+	ForeignOpen int
 }
 
 // verify re-checks the worker's own unresolved threads against the commits that
@@ -64,16 +69,26 @@ func (w *Worker) verify(
 		return verifyOutcome{}, fmt.Errorf("listing review threads: %w", err)
 	}
 
-	open, byID := openWorkerThreads(threads)
-	if len(open) == 0 {
+	// The evidence is what landed since the reviewed commit. Without a prior
+	// reviewed SHA there is nothing to compare against and every verdict would
+	// be a guess, so the pass is skipped rather than run blind. This is checked
+	// before the threads are counted: it is the difference between "could not
+	// run" and "ran and found nothing to do".
+	if state.LastReviewedSHA == "" || state.LastReviewedSHA == job.HeadSHA {
 		return verifyOutcome{}, nil
 	}
 
-	// The evidence is what landed since the reviewed commit. Without a prior
-	// reviewed SHA there is nothing to compare against and every verdict would
-	// be a guess, so the pass is skipped rather than run blind.
-	if state.LastReviewedSHA == "" || state.LastReviewedSHA == job.HeadSHA {
-		return verifyOutcome{}, nil
+	open, byID := openWorkerThreads(threads)
+	foreign := foreignOpenThreads(threads)
+
+	if len(open) == 0 {
+		// Nothing open is a result, not a skip: every thread the worker opened
+		// is already resolved (or it never opened one). Reporting Ran here is
+		// what lets a pull request whose last thread was closed on an earlier
+		// pass still be approved — `out.Open` is 0 and the condition
+		// PRW_APPROVE_WHEN_RESOLVED describes is satisfied. No engine call is
+		// made, because there is nothing to ask about.
+		return verifyOutcome{Ran: true, ForeignOpen: foreign}, nil
 	}
 
 	diff, err := prov.CompareDiff(ctx, job.Repo, state.LastReviewedSHA, job.HeadSHA)
@@ -94,7 +109,7 @@ func (w *Worker) verify(
 		return verifyOutcome{}, fmt.Errorf("verifying threads: %w", err)
 	}
 
-	out := verifyOutcome{Considered: len(open), Ran: true}
+	out := verifyOutcome{Considered: len(open), Ran: true, ForeignOpen: foreign}
 	touched := changedPaths(diff)
 
 	for _, v := range res.Verdicts {
@@ -165,25 +180,40 @@ func (w *Worker) verify(
 	return out, nil
 }
 
-// changedPaths reads the file names out of a unified diff. It takes them from
-// the `+++ b/path` lines rather than the `diff --git` header, because that is
-// the post-image name — the one a review comment is anchored to.
+// changedPaths reads the file names out of a unified diff, taking **both**
+// sides of each hunk header.
+//
+// The post-image (`+++ b/path`) is the name a review comment is anchored to,
+// so it is the one that usually matches. The pre-image (`--- a/path`) matters
+// for the two cases where the thread's path no longer exists in the new tree:
+// a file that was **deleted** (which trivially fixes any finding on it) and one
+// that was **renamed** (where the thread still carries the old name). Reading
+// only the post-image left both looking untouched, so a correct `fixed` verdict
+// was discarded and the thread stayed open forever.
+//
+// `/dev/null` is skipped: it is the absent side of an add or a delete, not a
+// path.
 func changedPaths(diff string) map[string]bool {
 	paths := make(map[string]bool)
 
 	for _, line := range strings.Split(diff, "\n") {
-		if !strings.HasPrefix(line, "+++ ") {
+		var prefix string
+
+		switch {
+		case strings.HasPrefix(line, "+++ "):
+			prefix = "b/"
+		case strings.HasPrefix(line, "--- "):
+			prefix = "a/"
+		default:
 			continue
 		}
 
-		p := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
-
-		// /dev/null is a deletion, which has no post-image path.
+		p := strings.TrimSpace(line[4:])
 		if p == "/dev/null" {
 			continue
 		}
 
-		paths[strings.TrimPrefix(p, "b/")] = true
+		paths[strings.TrimPrefix(p, prefix)] = true
 	}
 
 	return paths
@@ -232,6 +262,27 @@ func openWorkerThreads(threads []provider.ReviewThread) ([]reviewer.OpenThread, 
 	}
 
 	return open, byID
+}
+
+// foreignOpenThreads counts unresolved threads the worker did not open. They
+// are nobody's business but their author's, and approving while one is open
+// would overrule a reviewer the worker cannot even read a verdict for.
+func foreignOpenThreads(threads []provider.ReviewThread) int {
+	var n int
+
+	for _, t := range threads {
+		if t.Resolved || len(t.Comments) == 0 {
+			continue
+		}
+
+		if t.StartedByWorker && strings.Contains(t.Comments[0].Body, summaryMarker) {
+			continue
+		}
+
+		n++
+	}
+
+	return n
 }
 
 // lastCommentID picks the comment to reply to. GitHub threads a reply by the
@@ -304,17 +355,23 @@ func (w *Worker) approve(
 	out verifyOutcome,
 	newFindings int,
 	log *slog.Logger,
-) bool {
+) (bool, error) {
 	switch {
 	case !w.cfg.ApproveWhenResolved, !out.Ran, state.Approved:
-		return false
+		return false, nil
 	case out.Open > 0 || newFindings > 0:
-		return false
+		return false, nil
+	case out.ForeignOpen > 0:
+		// Somebody else's conversation is still open. The worker has no
+		// standing to resolve it and no business approving past it.
+		log.Info("not approving: unresolved threads from other reviewers", "threads", out.ForeignOpen)
+
+		return false, nil
 	}
 
 	tr, ok := prov.(provider.ThreadReviewer)
 	if !ok {
-		return false
+		return false, nil
 	}
 
 	body := fmt.Sprintf(
@@ -324,12 +381,20 @@ func (w *Worker) approve(
 	)
 
 	if err := tr.Approve(ctx, job.Repo, job.PRNumber, body); err != nil {
-		log.Warn("approving pull request failed, leaving it unapproved", "error", err)
+		var status *provider.StatusError
+		if errors.As(err, &status) && status.Permanent() {
+			log.Warn("approving pull request refused, leaving it unapproved", "error", err)
 
-		return false
+			return false, nil
+		}
+
+		// A timeout, a 429 or a 5xx says nothing about whether the approval is
+		// allowed, so the job fails and the retry tries again. The comments and
+		// resolves already stand and are idempotent.
+		return false, fmt.Errorf("approving pull request: %w", err)
 	}
 
 	log.Info("pull request approved", "resolved", out.Resolved)
 
-	return true
+	return true, nil
 }

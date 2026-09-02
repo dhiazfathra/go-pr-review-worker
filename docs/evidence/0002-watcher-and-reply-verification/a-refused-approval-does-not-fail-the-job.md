@@ -16,7 +16,7 @@ Job 5 on the sandbox PR: budget spent, both threads verified fixed and
 resolved, nothing new found, so `approve` fired. `dhiazfathra` was both the PR
 author and the token's account:
 
-```
+```text
 {"level":"INFO","msg":"threads verified","job":5,"engine":"claude","considered":2,"resolved":2,"still_open":0}
 {"level":"WARN","msg":"job failed, will retry","job":5,"attempt":1,"error":"approving pull request: POST /repos/dhiazfathra/prw-sandbox/pulls/1/reviews: unexpected status 422: {\"message\":\"Unprocessable Entity\",\"errors\":[\"Review Can not approve your own pull request\"],\"documentation_url\":\"https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request\",\"status\"","retry_in":"30s"}
 ```
@@ -54,28 +54,40 @@ during the 30s retry backoff:
 gh api repos/dhiazfathra/prw-sandbox/issues/1/comments --jq '.[].body' | grep -c failed
 ```
 
-```
+```text
 0
 ```
 
 ## The fix
 
-`approve` now returns `bool` instead of `(bool, error)`, logs the refusal, and
-leaves the pull request unapproved. Both call sites in `internal/worker/worker.go`
-lost their error branch.
+A **refusal** is logged and the pull request left unapproved; the job still
+succeeds. A **transient** failure still fails the job, because retrying it is
+the right thing to do — nothing about a timeout, a `429` or a `502` says the
+approval is disallowed. The two are told apart by the status code, via a typed
+`provider.StatusError`:
 
 ```go
 if err := tr.Approve(ctx, job.Repo, job.PRNumber, body); err != nil {
-	log.Warn("approving pull request failed, leaving it unapproved", "error", err)
+	var status *provider.StatusError
+	if errors.As(err, &status) && status.Permanent() {
+		log.Warn("approving pull request refused, leaving it unapproved", "error", err)
 
-	return false
+		return false, nil
+	}
+
+	return false, fmt.Errorf("approving pull request: %w", err)
 }
 ```
 
+The first version of this fix swallowed **every** approval error, which traded
+one bug for another: a `502` would have been recorded as "permanently
+unapproved" and never retried. The worker's own re-review of PR #2 caught that
+(`internal/worker/verify.go` thread), which is why the classification exists.
+
 ## The regression test, shown to fail without the fix
 
-`TestARefusedApprovalLeavesTheJobSuccessful` sets `approveErr` on the fake
-provider and relies on `runJob`, which fails the test if the queue does not
+`TestARefusedApprovalLeavesTheJobSuccessful` sets `approveErr` to a
+`*provider.StatusError` with code `422` and relies on `runJob`, which fails the test if the queue does not
 drain — and `PendingCount` counts `failed` jobs, so a job left in retry hangs
 it.
 
@@ -87,7 +99,7 @@ was restored temporarily to confirm the test actually reaches the approve path:
 go test ./internal/worker/ -run TestARefusedApprovalLeavesTheJobSuccessful
 ```
 
-```
+```text
 panic: OLD BEHAVIOUR: job would fail here: 422 Can not approve your own pull request
 FAIL	github.com/dhiazfathra/go-pr-review-worker/internal/worker	0.616s
 ```
@@ -97,7 +109,7 @@ FAIL	github.com/dhiazfathra/go-pr-review-worker/internal/worker	0.616s
 go test ./internal/worker/ -run TestARefusedApprovalLeavesTheJobSuccessful
 ```
 
-```
+```text
 ok  	github.com/dhiazfathra/go-pr-review-worker/internal/worker	0.342s
 ```
 
@@ -107,7 +119,7 @@ ok  	github.com/dhiazfathra/go-pr-review-worker/internal/worker	0.342s
 go test ./... && go vet ./... && golangci-lint run
 ```
 
-```
+```text
 ok  	github.com/dhiazfathra/go-pr-review-worker/cmd/pr-review-worker	1.847s
 ok  	github.com/dhiazfathra/go-pr-review-worker/internal/config	(cached)
 ok  	github.com/dhiazfathra/go-pr-review-worker/internal/provider	(cached)
@@ -125,3 +137,4 @@ open the PR, approved successfully — see
 [`replies-are-judged-against-the-diff.md`](./replies-are-judged-against-the-diff.md).
 The refusal path is covered by the unit test rather than re-provoked live,
 because provoking it again means deliberately dead-lettering a pull request.
+`TestATransientApprovalFailureFailsTheJob` covers the other side, with a `503`.

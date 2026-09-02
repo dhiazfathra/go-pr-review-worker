@@ -12,7 +12,7 @@ no empty-input or range validation.
 
 ## Pass 1 — four findings
 
-```
+```text
 {"level":"INFO","msg":"engine finished","job":1,"engine":"claude","findings":4}
 {"level":"INFO","msg":"comments posted","job":1,"candidates":4,"fresh":4,"posted":4,"unposted":0}
 ```
@@ -22,7 +22,7 @@ gh api repos/dhiazfathra/prw-sandbox/pulls/1/comments \
   --jq '.[] | "\(.id) \(.path):\(.line)"'
 ```
 
-```
+```text
 3911606887 stats.go:18   🔴 critical — Index out of range when p == 100
 3911607031 stats.go:16   🟠 major    — Percentile mutates caller's slice via sort.Float64s
 3911607118 stats.go:17   🟠 major    — No validation of p range or empty input
@@ -44,7 +44,7 @@ gh api -X POST repos/dhiazfathra/prw-sandbox/pulls/1/comments/3911606887/replies
 
 ## The follow-up pass resolves all four
 
-```
+```text
 {"level":"INFO","msg":"threads verified","job":3,"engine":"claude","considered":4,"resolved":4,"still_open":0}
 ```
 
@@ -56,14 +56,14 @@ which is the case ADR-0016 wants resolved.
 
 The same job then ran its review pass on the incremental diff:
 
-```
+```text
 {"level":"INFO","msg":"engine finished","job":3,"engine":"claude","findings":2}
 {"level":"INFO","msg":"comments posted","job":3,"candidates":2,"fresh":2,"posted":2,"unposted":0}
 ```
 
 Both new findings are correct and neither existed before the fix:
 
-```
+```text
 3911621972 stats.go:33       🟡 minor — Percentile does not reject NaN for p
 3911622092 stats_test.go:36  🟡 minor — No test for NaN percentile input
 ```
@@ -79,7 +79,7 @@ was `true` and every old thread was resolved, so the gate that held was
 sqlite3 run1/prw.db 'select cycle,last_reviewed_sha,approved from pr_reviews;'
 ```
 
-```
+```text
 2|a3aa296aa9af593ecd8258278c929919d6270c76|0
 ```
 
@@ -90,7 +90,7 @@ each of the two new threads. `cycle` was already at `MaxCycles=2`, so no review
 ran — but the follow-up did, which is ADR-0016's "the pass does not consume a
 cycle and runs after the budget is spent":
 
-```
+```text
 {"level":"INFO","msg":"threads verified","job":5,"engine":"claude","considered":2,"resolved":2,"still_open":0}
 {"level":"INFO","msg":"pull request approved","job":5,"resolved":2}
 {"level":"INFO","msg":"job done","job":5,"duration":"19.992727417s"}
@@ -105,7 +105,7 @@ gh api graphql -f query='{repository(owner:"dhiazfathra",name:"prw-sandbox"){pul
 sqlite3 run1/prw.db 'select cycle,last_reviewed_sha,approved from pr_reviews;'
 ```
 
-```
+```text
 dhiazfathra          COMMENTED   (×18)
 dhiaz-dermaesthetics COMMENTED   (×2)
 dhiaz-dermaesthetics APPROVED

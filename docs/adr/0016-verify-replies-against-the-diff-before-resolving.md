@@ -62,6 +62,10 @@ prompt:
   the worker then adopts and resolves.
 - An **unrecognised** verdict string is downgraded to `unrelated`, not guessed
   at — a typo must never read as `fixed`.
+- The changed-file set is read from **both** sides of each diff hunk header, so
+  a finding on a file the follow-up commits deleted or renamed still counts as
+  touched. Reading only the post-image made those look untouched and stranded a
+  correct verdict.
 - A thread whose `resolveReviewThread` call **fails** stays counted as open, so
   the next pass retries it and an approval cannot slip through behind it.
 - The worker's **own replies are filtered out** of what it reads back, or it
@@ -86,16 +90,23 @@ consequence of upgrading it. `pr_reviews.approved` makes it once-only.
 Approval is withheld when the same pass posted a new finding — approving and
 objecting in one breath is incoherent — and when any thread is still open.
 
+Approval is also withheld while **any thread the worker does not own** is
+unresolved. The worker has no standing to close somebody else's conversation,
+and no business approving past it — a human objection is still an objection.
+
 A **refused** approval is logged and the pull request left unapproved; it does
-not fail the job. The forge refuses for reasons that are permanent and none of
+not fail the job. A **transient** failure (a timeout, `408`, `429`, a 5xx) does
+fail it, so the retry tries again: swallowing every error would record a `502`
+as "permanently unapproved". `provider.StatusError.Permanent()` draws the line
+at the status code. The forge refuses for reasons that are permanent and none of
 them mean the review went wrong: `422 Can not approve your own pull request`
 when the token's account opened the pull request, `403` when it cannot review
 the repository. Returning an error there retried a call that could never
 succeed and then dead-lettered a pull request whose findings were posted and
 whose threads were resolved — telling the author the review failed when it had
-not. Found by
+not. Both halves were found the same way: the refusal by the sandbox run in
 [evidence 0002](../evidence/0002-watcher-and-reply-verification/a-refused-approval-does-not-fail-the-job.md),
-which is also why `approve` returns a plain `bool`.
+and the over-correction by the worker reviewing its own pull request.
 
 ### Provider capability
 

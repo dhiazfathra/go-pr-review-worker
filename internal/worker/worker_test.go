@@ -125,6 +125,15 @@ func (f *fakeProvider) PostSummary(_ context.Context, _ string, _ int, body stri
 	return fmt.Sprintf("summary-%d", len(f.summaries)), nil
 }
 
+// summaryBodies returns every summary-level comment posted, for tests that
+// care whether a dead-letter notice was one of them.
+func (f *fakeProvider) summaryBodies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]string(nil), f.summaries...)
+}
+
 func (f *fakeProvider) UpdateSummary(_ context.Context, _, _, body string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -62,6 +62,34 @@ type ReviewThread struct {
 	StartedByWorker bool
 }
 
+// StatusError is a non-2xx response. It carries the status code so a caller
+// can tell a permanent refusal from a transient one: retrying a `422` is
+// pointless, retrying a `502` is the right thing to do.
+type StatusError struct {
+	Method string
+	Path   string
+	Code   int
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s %s: unexpected status %d: %s", e.Method, e.Path, e.Code, e.Body)
+}
+
+// Permanent reports whether retrying the same request could ever succeed.
+// Everything the forge answers in the 4xx range is a statement about the
+// request itself — bad credentials, missing scope, a rule that forbids the
+// action — except `408` and `429`, which are about timing. Anything else
+// (5xx, transport errors) is treated as transient.
+func (e *StatusError) Permanent() bool {
+	switch e.Code {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	default:
+		return e.Code >= 400 && e.Code < 500
+	}
+}
+
 // ErrTooManyResults is returned by a list call whose paging cap was reached
 // while the forge still had more to give. Returning the truncated list as if
 // it were complete would make the watcher silently ignore every pull request
@@ -190,7 +218,7 @@ func (c *httpClient) do(
 	}
 
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return raw, fmt.Errorf("%s %s: unexpected status %d: %s", method, path, res.StatusCode, snippet(raw))
+		return raw, &StatusError{Method: method, Path: path, Code: res.StatusCode, Body: snippet(raw)}
 	}
 
 	return raw, nil
