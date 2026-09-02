@@ -79,7 +79,11 @@ already-queued head `a481309`, so it was rejected at intake with `HTTP 200` and
 never became a job.
 
 ```json
-{"level":"INFO","msg":"duplicate delivery ignored","delivery":"github:dhiazfathra/go-pr-review-worker#1:a481309cc138d377c648d6d2750388d30107c77c"}
+{
+  "level": "INFO",
+  "msg": "duplicate delivery ignored",
+  "delivery": "github:dhiazfathra/go-pr-review-worker#1:a481309cc138d377c648d6d2750388d30107c77c"
+}
 ```
 
 That is the idempotency key doing its job

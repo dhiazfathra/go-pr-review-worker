@@ -29,11 +29,16 @@ type fakeProvider struct {
 	compareErr  error
 	inlineErr   error
 
+	openPRs   []provider.OpenPullRequest
+	openPRErr error
+
 	inline         []provider.InlineComment
 	summaries      []string
 	updates        []string
 	compareCalls   [][2]string
 	fullDiffCalls  int
+	listCalls      int
+	listedFor      []string
 	postSummaryErr error
 }
 
@@ -41,6 +46,29 @@ func (f *fakeProvider) Name() string { return "github" }
 
 func (f *fakeProvider) PullRequest(context.Context, string, int) (provider.PullRequest, error) {
 	return f.pr, nil
+}
+
+func (f *fakeProvider) ListOpenPullRequests(_ context.Context, repo string) ([]provider.OpenPullRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.listCalls++
+	f.listedFor = append(f.listedFor, repo)
+
+	if f.openPRErr != nil {
+		return nil, f.openPRErr
+	}
+
+	return f.openPRs, nil
+}
+
+// listedRepos reports which repositories were actually asked about, so a test
+// can tell "the sweep reached this target" from "the sweep returned early".
+func (f *fakeProvider) listedRepos() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]string(nil), f.listedFor...)
 }
 
 func (f *fakeProvider) Diff(context.Context, string, int) (string, error) {
@@ -95,6 +123,15 @@ func (f *fakeProvider) PostSummary(_ context.Context, _ string, _ int, body stri
 	f.summaries = append(f.summaries, body)
 
 	return fmt.Sprintf("summary-%d", len(f.summaries)), nil
+}
+
+// summaryBodies returns every summary-level comment posted, for tests that
+// care whether a dead-letter notice was one of them.
+func (f *fakeProvider) summaryBodies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]string(nil), f.summaries...)
 }
 
 func (f *fakeProvider) UpdateSummary(_ context.Context, _, _, body string) error {

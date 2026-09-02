@@ -12,6 +12,7 @@ import (
 
 	"github.com/dhiazfathra/go-pr-review-worker/internal/config"
 	"github.com/dhiazfathra/go-pr-review-worker/internal/provider"
+	"github.com/dhiazfathra/go-pr-review-worker/internal/reviewer"
 	"github.com/dhiazfathra/go-pr-review-worker/internal/store"
 )
 
@@ -87,12 +88,30 @@ func TestCLIEngineCarriesTheTimeout(t *testing.T) {
 		"claude",
 		"claude",
 		[]string{"--print"},
+		"claude-sonnet-5",
 		config.Config{EngineTimeout: 3 * time.Minute, MaxFindings: 9},
 		slog.Default(),
 	)
 
 	if engine.Name() != "claude" {
 		t.Fatalf("Name = %q", engine.Name())
+	}
+
+	// The name alone would still pass if cliEngine dropped the model, which is
+	// the whole point of PRW_CLAUDE_MODEL: the pinned model has to reach the
+	// engine, or the CLI falls back to whatever the account's own settings say
+	// (see docs/incidents/2026-09-02-manual-run-stale-model-alias.md).
+	cli, ok := engine.(reviewer.CLI)
+	if !ok {
+		t.Fatalf("engine is %T, want reviewer.CLI", engine)
+	}
+
+	if cli.Model != "claude-sonnet-5" {
+		t.Errorf("Model = %q, want the model cliEngine was given", cli.Model)
+	}
+
+	if cli.Timeout != 3*time.Minute {
+		t.Errorf("Timeout = %v, want 3m", cli.Timeout)
 	}
 }
 

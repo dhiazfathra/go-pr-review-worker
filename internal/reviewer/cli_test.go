@@ -61,6 +61,57 @@ esac`
 	}
 }
 
+// A CLI authenticated by subscription login reads the OS keyring, and that
+// lookup is keyed by the account name. Stripping USER/LOGNAME made the engine
+// fail with "Invalid API key" on a host where the CLI worked interactively.
+func TestCLIChildEnvCarriesKeyringIdentityButNoSecrets(t *testing.T) {
+	t.Setenv("USER", "prw")
+	t.Setenv("LOGNAME", "prw")
+	t.Setenv("PRW_GITHUB_TOKEN", "ghp-must-not-leak")
+
+	// The stub reports its own environment, so this asserts what the engine
+	// actually receives rather than what the allowlist says.
+	res, err := newCLI(t, `cat >/dev/null
+echo "{\"summary\":\"$(env | sort | tr '\n' ';')\",\"findings\":[]}"`, 10*time.Second).
+		Review(context.Background(), Request{Repo: "r", PRNumber: 1, Diff: "d"})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+
+	// The environment is only ever asserted against, never echoed: printing it
+	// on failure would copy whatever credentials it carries into the test log.
+	for _, want := range []string{"USER=prw", "LOGNAME=prw"} {
+		if !strings.Contains(res.Summary, want) {
+			t.Errorf("engine env is missing %s; keyring auth would fail", want)
+		}
+	}
+
+	if strings.Contains(res.Summary, "ghp-must-not-leak") {
+		t.Error("the forge token reached the engine environment")
+	}
+}
+
+func TestCLIModelOverridesInheritedAnthropicModel(t *testing.T) {
+	t.Setenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")
+
+	engine := newCLI(t, `cat >/dev/null
+echo "{\"summary\":\"$(env | sort | tr '\n' ';')\",\"findings\":[]}"`, 10*time.Second)
+	engine.Model = "claude-sonnet-5"
+
+	res, err := engine.Review(context.Background(), Request{Repo: "r", PRNumber: 1, Diff: "d"})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+
+	if !strings.Contains(res.Summary, "ANTHROPIC_MODEL=claude-sonnet-5") {
+		t.Error("Model did not override the inherited ANTHROPIC_MODEL")
+	}
+
+	if strings.Contains(res.Summary, "claude-3-7-sonnet-20250219") {
+		t.Error("the retired model id from the shell leaked through instead of being overridden")
+	}
+}
+
 func TestCLIDetectsRateLimitSignals(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -137,6 +188,33 @@ sleep 30`
 	}
 }
 
+// A shutdown and an overrunning engine both cancel the invocation, but they are
+// different incidents: reporting the first as a timeout sends someone hunting a
+// slow engine that was behaving.
+func TestCLIParentCancellationIsNotReportedAsATimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	// The timeout is long enough that only the parent's cancellation can end
+	// this invocation.
+	_, err := newCLI(t, "sleep 30", time.Hour).Review(ctx, Request{Diff: "d"})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("err = %v, want it reported as a cancellation", err)
+	}
+
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("err = %v, must not blame a timeout for the parent's cancellation", err)
+	}
+}
+
 func TestCLIMissingBinary(t *testing.T) {
 	cli := CLI{
 		EngineName:     "absent",
@@ -202,5 +280,104 @@ func TestFirstLineTruncates(t *testing.T) {
 
 	if got := firstLine(strings.Repeat("x", 500)); len(got) != 300 {
 		t.Fatalf("len = %d, want 300", len(got))
+	}
+}
+
+func verifyRequest() VerifyRequest {
+	return VerifyRequest{
+		Repo:     "o/r",
+		PRNumber: 7,
+		Title:    "Add trace id",
+		Diff:     "@@ delta @@",
+		Threads:  []OpenThread{{ID: "T1", File: "a.ts", Line: 30, Finding: "bug", Replies: []string{"dev: fixed"}}},
+	}
+}
+
+func TestCLIVerifyParsesVerdicts(t *testing.T) {
+	script := `cat >/dev/null
+echo '{"verdicts":[{"id":"T1","verdict":"fixed","note":"looks right"}]}'`
+
+	res, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(res.Verdicts) != 1 || res.Verdicts[0].Verdict != VerdictFixed {
+		t.Fatalf("verdicts = %+v", res.Verdicts)
+	}
+}
+
+// The prompt goes on stdin for Verify exactly as it does for Review, so a large
+// diff never hits ARG_MAX.
+func TestCLIVerifySeesThePromptOnStdin(t *testing.T) {
+	script := `input=$(cat)
+case "$input" in
+  *"thread id: T1"*) echo '{"verdicts":[{"id":"T1","verdict":"fixed","note":"n"}]}' ;;
+  *) echo '{"verdicts":[]}' ;;
+esac`
+
+	res, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(res.Verdicts) != 1 {
+		t.Fatal("the verify prompt did not reach the engine on stdin")
+	}
+}
+
+func TestCLIVerifyWithNoThreadsDoesNotRunTheEngine(t *testing.T) {
+	// A stub that would fail loudly if it ever ran.
+	res, err := newCLI(t, "exit 1", 10*time.Second).Verify(context.Background(), VerifyRequest{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(res.Verdicts) != 0 {
+		t.Fatalf("verdicts = %+v, want none", res.Verdicts)
+	}
+}
+
+func TestCLIVerifyDetectsRateLimiting(t *testing.T) {
+	script := `cat >/dev/null
+echo "Claude usage limit reached" >&2
+exit 1`
+
+	_, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited so the chain falls back", err)
+	}
+}
+
+func TestCLIVerifyRateLimitTextWithVerdictsIsNotAFallback(t *testing.T) {
+	script := `cat >/dev/null
+echo '{"verdicts":[{"id":"T1","verdict":"unfixed","note":"the rate limit handling is still wrong"}]}'`
+
+	res, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(res.Verdicts) != 1 {
+		t.Fatal("a verdict discussing rate limiting was misread as the engine being rate limited")
+	}
+}
+
+func TestCLIVerifyUnparsableOutput(t *testing.T) {
+	_, err := newCLI(t, "cat >/dev/null\necho not json", 10*time.Second).
+		Verify(context.Background(), verifyRequest())
+	if err == nil {
+		t.Fatal("err = nil, want a failure on output carrying no JSON")
+	}
+}
+
+func TestCLIVerifyFailureCarriesTheEngineOutput(t *testing.T) {
+	script := `cat >/dev/null
+echo "engine exploded" >&2
+exit 3`
+
+	_, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if err == nil || !strings.Contains(err.Error(), "engine exploded") {
+		t.Fatalf("err = %v, want the engine's message for diagnosis", err)
 	}
 }

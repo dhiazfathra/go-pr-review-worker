@@ -23,6 +23,20 @@ docs/evidence/
 - **One `.md` per claim**, not one file per task. Someone checking "does the
   cycle budget hold" should not have to wade through unrelated build logs.
 
+## Contents
+
+- **[0001-review-worker-end-to-end](./0001-review-worker-end-to-end/)** — the
+  first live run, on this repository's own
+  [PR #1](https://github.com/dhiazfathra/go-pr-review-worker/pull/1): two
+  review passes driven by signed webhook deliveries, and the third push that
+  gets a budget notice instead of a review.
+- **[0002-watcher-and-reply-verification](./0002-watcher-and-reply-verification/)**
+  — the watcher ([ADR-0015](../adr/0015-watch-repositories-instead-of-trusting-webhooks.md))
+  and the follow-up pass ([ADR-0016](../adr/0016-verify-replies-against-the-diff-before-resolving.md)),
+  run against a throwaway PR on a repository with no webhook at all. Includes
+  the defect the run found: a forge that refuses an approval used to fail the
+  whole job.
+
 ## What goes in each `.md`
 
 ```markdown

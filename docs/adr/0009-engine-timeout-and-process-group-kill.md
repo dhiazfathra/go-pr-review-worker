@@ -23,7 +23,7 @@ Per invocation:
 - On timeout: `SIGTERM` to `-pgid`, a 2 second grace period, then `SIGKILL` to
   `-pgid`; then reap `cmd.Wait` so no zombie remains.
 - stdout and stderr are captured through a `limitedWriter` capped at 4 MB that
-  *discards* the excess and reports a full write, so a runaway CLI truncates its
+  _discards_ the excess and reports a full write, so a runaway CLI truncates its
   log instead of exhausting RAM.
 
 A timeout is an ordinary job failure: it retries, then dead-letters

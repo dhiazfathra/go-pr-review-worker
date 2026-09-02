@@ -102,6 +102,31 @@ func TestFingerprintIgnoresBodyWording(t *testing.T) {
 	}
 }
 
+// The NUL-joined fingerprint is injective only while no field contains a NUL of
+// its own. JSON can encode one, so an engine could otherwise emit a finding
+// that fingerprints identically to a real one and silently suppress it.
+func TestParseResultDropsFindingsCarryingNUL(t *testing.T) {
+	// ("a.go" + NUL + "shadow", "t") and ("a.go", "shadow" + NUL + "t") join to
+	// the same byte string, so the second would displace the first.
+	out := `{"summary":"s","findings":[
+	  {"file":"a.go\u0000shadow","line":1,"severity":"major","title":"t","body":"b"},
+	  {"file":"a.go","line":2,"severity":"major","title":"shadow\u0000t","body":"b"},
+	  {"file":"real.go","line":3,"severity":"major","title":"kept","body":"b"}]}`
+
+	res, err := parseResult(out)
+	if err != nil {
+		t.Fatalf("parseResult: %v", err)
+	}
+
+	if len(res.Findings) != 1 {
+		t.Fatalf("findings = %+v, want only the NUL-free one", res.Findings)
+	}
+
+	if res.Findings[0].File != "real.go" {
+		t.Fatalf("kept %q, want real.go", res.Findings[0].File)
+	}
+}
+
 type fakeEngine struct {
 	name string
 	res  Result
@@ -235,5 +260,99 @@ func TestBuildPromptSecondCycleWithoutPriorFindingsHasNoDanglingList(t *testing.
 
 	if strings.Contains(got, "the list above") {
 		t.Fatalf("prompt points at a list that was never rendered:\n%s", got)
+	}
+}
+
+// verifyingFake is a fakeEngine that also implements Verifier, so a chain can
+// mix engines that can verify with ones that cannot.
+type verifyingFake struct {
+	fakeEngine
+
+	vres VerifyResult
+	verr error
+}
+
+func (f verifyingFake) Verify(_ context.Context, _ VerifyRequest) (VerifyResult, error) {
+	*f.calls++
+
+	return f.vres, f.verr
+}
+
+func TestChainVerifyFallsBackOnlyOnRateLimit(t *testing.T) {
+	var primary, fallback int
+
+	chain := Chain{Engines: []Engine{
+		verifyingFake{fakeEngine: fakeEngine{name: "claude", calls: &primary}, verr: ErrRateLimited},
+		verifyingFake{
+			fakeEngine: fakeEngine{name: "opencode", calls: &fallback},
+			vres:       VerifyResult{Verdicts: []ThreadVerdict{{ID: "T1", Verdict: VerdictFixed}}},
+		},
+	}}
+
+	res, err := chain.Verify(context.Background(), VerifyRequest{Threads: []OpenThread{{ID: "T1"}}})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if res.Engine != "opencode" || len(res.Verdicts) != 1 {
+		t.Fatalf("res = %+v, want the fallback's verdicts", res)
+	}
+
+	if primary != 1 || fallback != 1 {
+		t.Fatalf("calls: primary=%d fallback=%d", primary, fallback)
+	}
+}
+
+func TestChainVerifyDoesNotFallBackOnOtherErrors(t *testing.T) {
+	var primary, fallback int
+
+	chain := Chain{Engines: []Engine{
+		verifyingFake{fakeEngine: fakeEngine{name: "claude", calls: &primary}, verr: errors.New("bad prompt")},
+		verifyingFake{fakeEngine: fakeEngine{name: "opencode", calls: &fallback}},
+	}}
+
+	if _, err := chain.Verify(context.Background(), VerifyRequest{}); err == nil {
+		t.Fatal("err = nil, want the failure returned without burning the fallback")
+	}
+
+	if fallback != 0 {
+		t.Fatalf("fallback ran %d time(s) on a non-rate-limit failure", fallback)
+	}
+}
+
+// Pairing a verifying engine with one that cannot verify must still work: the
+// non-verifier is skipped, not treated as a failure.
+func TestChainVerifySkipsEnginesThatCannotVerify(t *testing.T) {
+	var plain, verifier int
+
+	chain := Chain{Engines: []Engine{
+		fakeEngine{name: "plain", calls: &plain},
+		verifyingFake{
+			fakeEngine: fakeEngine{name: "claude", calls: &verifier},
+			vres:       VerifyResult{Verdicts: []ThreadVerdict{{ID: "T1", Verdict: VerdictPartial}}},
+		},
+	}}
+
+	res, err := chain.Verify(context.Background(), VerifyRequest{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if res.Engine != "claude" {
+		t.Fatalf("Engine = %q, want the verifying engine", res.Engine)
+	}
+
+	if plain != 0 {
+		t.Errorf("the non-verifying engine was invoked %d time(s)", plain)
+	}
+}
+
+func TestChainVerifyWithNoVerifyingEngines(t *testing.T) {
+	var plain int
+
+	chain := Chain{Engines: []Engine{fakeEngine{name: "plain", calls: &plain}}}
+
+	if _, err := chain.Verify(context.Background(), VerifyRequest{}); err == nil {
+		t.Fatal("err = nil, want an error when nothing in the chain can verify")
 	}
 }

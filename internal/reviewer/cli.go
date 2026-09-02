@@ -36,6 +36,50 @@ var rateLimitSignals = regexp.MustCompile(`(?i)` + strings.Join([]string{
 	`retry[ _-]after`,
 }, "|"))
 
+// defaultTimeout applies when CLI.Timeout is unset, so a zero value never
+// produces an already-expired context.
+const defaultTimeout = 10 * time.Minute
+
+// childEnvAllowlist are the variables the engine process needs. Everything
+// else in the worker's environment — forge tokens, webhook secrets — stays
+// out, since contributor-controlled PR content reaches the engine and could
+// otherwise exfiltrate them through its tools.
+//
+// USER and LOGNAME are not decoration: a CLI authenticated by subscription
+// login rather than an API key reads its credentials from the OS keyring
+// (macOS Keychain, libsecret), and that lookup is keyed by the account name.
+// Drop them and the engine fails with "Invalid API key · Please run /login"
+// on a host where `claude` works fine interactively.
+var childEnvAllowlist = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR",
+	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR",
+	"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL",
+}
+
+// childEnv builds a minimal environment for the engine subprocess. model,
+// when non-empty, overrides any inherited ANTHROPIC_MODEL so a subscription
+// CLI's own persisted settings (which HOME/XDG_CONFIG_HOME let it read) can
+// never silently pick a retired model id.
+func childEnv(model string) []string {
+	env := []string{"CI=1"}
+
+	for _, k := range childEnvAllowlist {
+		if k == "ANTHROPIC_MODEL" && model != "" {
+			continue
+		}
+
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+
+	if model != "" {
+		env = append(env, "ANTHROPIC_MODEL="+model)
+	}
+
+	return env
+}
+
 // CLI runs an agentic coding CLI in headless mode as a review engine.
 type CLI struct {
 	// EngineName is the adapter name used in logs and the summary footer.
@@ -53,7 +97,15 @@ type CLI struct {
 	// MaxOutputBytes caps captured output so a runaway CLI cannot exhaust RAM
 	// on a 2 vCPU / 4 GB box.
 	MaxOutputBytes int64
-	Logger         *slog.Logger
+	// Model, if set, is forced into the child's ANTHROPIC_MODEL, overriding
+	// whatever the invoking shell or the CLI's own persisted user settings
+	// would otherwise pick. Without this, a stale model alias in the
+	// operator's ~/.claude/settings.json silently reaches the subprocess
+	// (HOME is allowlisted for the CLI's own config/credentials) and a
+	// retired dated model id dead-letters every job with a 404 — see
+	// docs/incidents/2026-09-02-manual-run-stale-model-alias.md.
+	Model  string
+	Logger *slog.Logger
 }
 
 // Name implements Engine.
@@ -91,17 +143,54 @@ func (c CLI) Review(ctx context.Context, req Request) (Result, error) {
 	return res, nil
 }
 
+// Verify implements Verifier: it re-runs the CLI with the follow-up contract
+// and parses the per-thread verdicts.
+func (c CLI) Verify(ctx context.Context, req VerifyRequest) (VerifyResult, error) {
+	if len(req.Threads) == 0 {
+		return VerifyResult{}, nil
+	}
+
+	stdout, stderr, err := c.run(ctx, buildVerifyPrompt(req))
+	combined := stdout + "\n" + stderr
+
+	if err != nil {
+		if rateLimitSignals.MatchString(combined) {
+			return VerifyResult{}, fmt.Errorf("%s: %w: %s", c.EngineName, ErrRateLimited, firstLine(combined))
+		}
+
+		return VerifyResult{}, fmt.Errorf("%s verify invocation: %w: %s", c.EngineName, err, firstLine(combined))
+	}
+
+	if rateLimitSignals.MatchString(combined) && !strings.Contains(stdout, `"verdicts"`) {
+		return VerifyResult{}, fmt.Errorf("%s: %w: %s", c.EngineName, ErrRateLimited, firstLine(combined))
+	}
+
+	res, err := parseVerifyResult(stdout, req.Threads)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("%s verify output: %w", c.EngineName, err)
+	}
+
+	return res, nil
+}
+
 // run spawns the CLI in its own process group and returns its output. On
 // timeout the whole group is killed, so a CLI that spawned children (a shell,
 // a language server) cannot leak processes onto a small VM.
 func (c CLI) run(ctx context.Context, prompt string) (string, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+
+	parent := ctx
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.Command(c.Binary, c.Args...)
+	cmd := exec.Command(c.Binary, c.Args...) // nosemgrep: dangerous-exec-command -- Binary/Args come from operator-set PRW_*_BIN/PRW_*_ARGS config (internal/config), never from PR/webhook content
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "CI=1")
+	cmd.Env = childEnv(c.Model)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &stdout, remaining: c.MaxOutputBytes}
@@ -123,29 +212,50 @@ func (c CLI) run(ctx context.Context, prompt string) (string, string, error) {
 		return stdout.String(), stderr.String(), nil
 
 	case <-ctx.Done():
-		c.kill(cmd)
-		<-done // reap, the group is already signalled
+		if !c.kill(cmd, done) {
+			<-done // reap, the group is already signalled
+		}
+
+		// The worker shutting down and the engine overrunning its budget both
+		// land here, and they are not the same incident: one is expected, the
+		// other is the engine misbehaving. Reporting the parent's cancellation
+		// as a timeout would send someone hunting a slow engine that was fine.
+		if parentErr := parent.Err(); parentErr != nil {
+			return stdout.String(), stderr.String(),
+				fmt.Errorf("%s cancelled: %w", c.Binary, parentErr)
+		}
 
 		return stdout.String(), stderr.String(),
-			fmt.Errorf("%s timed out after %s: %w", c.Binary, c.Timeout, ctx.Err())
+			fmt.Errorf("%s timed out after %s: %w", c.Binary, timeout, ctx.Err())
 	}
 }
 
 // kill signals the whole process group, then SIGKILLs it after a short grace
-// period so a CLI ignoring SIGTERM still cannot hold the worker.
-func (c CLI) kill(cmd *exec.Cmd) {
+// period so a CLI ignoring SIGTERM still cannot hold the worker. It reports
+// whether cmd.Wait already returned during the grace period, so the caller
+// never reaps twice and SIGKILL never reaches a pid recycled by the OS.
+func (c CLI) kill(cmd *exec.Cmd, done <-chan error) bool {
 	pgid := -cmd.Process.Pid
 
 	if err := syscall.Kill(pgid, syscall.SIGTERM); err != nil && c.Logger != nil {
 		c.Logger.Warn("sigterm to engine group failed", "engine", c.EngineName, "error", err)
 	}
 
-	time.Sleep(2 * time.Second)
+	grace := time.NewTimer(2 * time.Second)
+	defer grace.Stop()
+
+	select {
+	case <-done:
+		return true
+	case <-grace.C:
+	}
 
 	if err := syscall.Kill(pgid, syscall.SIGKILL); err != nil &&
 		!errors.Is(err, syscall.ESRCH) && c.Logger != nil {
 		c.Logger.Warn("sigkill to engine group failed", "engine", c.EngineName, "error", err)
 	}
+
+	return false
 }
 
 // limitedWriter discards everything past remaining bytes instead of failing,

@@ -16,8 +16,12 @@ comments and concludes the code is clean.
 - `jobs.attempts` increments on every claim. Below `PRW_MAX_ATTEMPTS`
   (default 3) a failure sets the job back to `failed`, which `ClaimNext` treats
   as runnable, after a fixed `PRW_RETRY_DELAY` (default 30s).
-- At the limit the job becomes `dead` and the worker posts one comment on the PR:
-  *"Automated review failed after N attempts"*, with the error text.
+- At the limit the job becomes `dead` and the worker posts one comment on the
+  PR: _"Automated review failed after N attempts and will not be retried for
+  `<sha>`. See the worker log for details."_ The **cause is deliberately not in
+  it**: a failure message can carry a URL, a token fragment, or an engine's
+  prompt back into a public conversation. `jobs.last_error` and the log hold the
+  detail, where the operator can read it and the internet cannot.
 - A failed pass never advances `pr_reviews.cycle`, so the budget is not spent on
   a review that did not happen.
 - Dead rows stay in the table as the dead-letter record; `last_error` holds the

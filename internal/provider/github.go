@@ -77,6 +77,68 @@ func (g *GitHub) PullRequest(ctx context.Context, repo string, number int) (Pull
 	}, nil
 }
 
+// ListOpenPullRequests implements Provider. Pages are followed to the end so a
+// repository with more than one page of open PRs does not silently lose the
+// tail — an unreviewed PR is exactly what the watcher exists to catch.
+func (g *GitHub) ListOpenPullRequests(ctx context.Context, repo string) ([]OpenPullRequest, error) {
+	var out []OpenPullRequest
+
+	for page := 1; page <= maxListPages; page++ {
+		raw, err := g.c.do(
+			ctx,
+			"GET",
+			fmt.Sprintf("/repos/%s/pulls?state=open&per_page=100&page=%d", repo, page),
+			nil,
+			githubHeaders(githubJSON),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		var payload []struct {
+			Number int  `json:"number"`
+			Draft  bool `json:"draft"`
+			Head   struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
+			Base struct {
+				SHA string `json:"sha"`
+			} `json:"base"`
+		}
+
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return nil, fmt.Errorf("decoding github pull request list: %w", err)
+		}
+
+		for _, p := range payload {
+			// A draft has not been offered for review yet; reviewing it would
+			// spend the budget before the author is asking for an opinion.
+			if p.Draft {
+				continue
+			}
+
+			out = append(out, OpenPullRequest{
+				Number:  p.Number,
+				HeadSHA: p.Head.SHA,
+				BaseSHA: p.Base.SHA,
+			})
+		}
+
+		if len(payload) < 100 {
+			return out, nil
+		}
+	}
+
+	// The last allowed page was full, so there are more open pull requests
+	// than the cap admits. Returning the truncated list would leave the
+	// watcher permanently blind to everything past it, with no signal.
+	return nil, fmt.Errorf("%w: open pull requests on %s", ErrTooManyResults, repo)
+}
+
+// maxListPages bounds pagination so a pathological repository cannot make one
+// watcher tick run unbounded against the API.
+const maxListPages = 10
+
 // Diff implements Provider.
 func (g *GitHub) Diff(ctx context.Context, repo string, number int) (string, error) {
 	raw, err := g.c.do(

@@ -34,7 +34,7 @@ Connection settings: `journal_mode=WAL`, `busy_timeout=5000`,
 - Pros: purpose-built queues, visibility timeouts for free.
 - Cons: a second process to install, monitor and keep alive, with its own RAM
   budget, to serialize a queue that by requirement has exactly one consumer.
-- Rejected: the requirement is *one worker, one job at a time*. There is no
+- Rejected: the requirement is _one worker, one job at a time_. There is no
   distribution problem to solve.
 
 ### PostgreSQL
@@ -55,7 +55,24 @@ Connection settings: `journal_mode=WAL`, `busy_timeout=5000`,
 
 - `SetMaxOpenConns(1)` matches the single writer; `SQLITE_BUSY` storms cannot
   happen by construction.
-- Backup is `cp prw.db*`; inspection is `sqlite3 prw.db`.
+- Backup is `VACUUM INTO`, not `cp prw.db*`: in WAL mode a filesystem copy can
+  catch the main file, `-wal`, and `-shm` in inconsistent states and lose
+  committed-but-not-checkpointed transactions. `VACUUM INTO` (or the Online
+  Backup API) produces a consistent snapshot without stopping the worker. The
+  destination must be a new path — SQLite refuses to overwrite an existing
+  non-empty file — so the timestamp is part of the command, not an optional
+  nicety:
+
+  ```sh
+  sqlite3 /var/lib/pr-review-worker/prw.db \
+    "VACUUM INTO '/var/lib/pr-review-worker/backup-$(date -u +%Y%m%dT%H%M%SZ).db'"
+  ```
+
+  Inspection is `sqlite3 /var/lib/pr-review-worker/prw.db`. Both paths are
+  absolute deliberately: `deploy/pr-review-worker.service` sets
+  `PRW_DB=/var/lib/pr-review-worker/prw.db`, so a relative `prw.db` run from
+  anywhere else either fails or quietly opens a different, empty database.
+
 - The queue is polled rather than pushed, so a lost notification degrades
   latency, not correctness.
 - A job left in `running` by a crash is picked up again on start. That is safe

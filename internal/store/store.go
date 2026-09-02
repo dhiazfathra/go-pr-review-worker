@@ -62,6 +62,9 @@ type PRState struct {
 	SummaryCommentID   string // provider id of the summary comment, for in-place updates
 	SummaryCycle       int    // cycle that posted SummaryCommentID
 	BudgetNoticePosted bool
+	// Approved records that the worker already submitted an approving review,
+	// so a later pass over the same PR cannot stack a second one.
+	Approved bool
 }
 
 // Store is a SQLite-backed queue and review-budget store.
@@ -94,6 +97,7 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
     summary_comment_id   TEXT    NOT NULL DEFAULT '',
     summary_cycle        INTEGER NOT NULL DEFAULT 0,
     budget_notice_posted INTEGER NOT NULL DEFAULT 0,
+    approved             INTEGER NOT NULL DEFAULT 0,
     updated_at           TEXT    NOT NULL
 );
 
@@ -123,7 +127,42 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
 
+	if err := migrate(db); err != nil {
+		return nil, err
+	}
+
 	return &Store{db: db}, nil
+}
+
+// migrate adds columns that a database created by an earlier version does not
+// have. `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a new
+// column in `schema` never reaches a deployed database without this.
+func migrate(db *sql.DB) error {
+	// Each entry is a column that must exist on pr_reviews. SQLite has no
+	// "ADD COLUMN IF NOT EXISTS", so existence is checked first.
+	columns := []struct{ name, ddl string }{
+		{"approved", "ALTER TABLE pr_reviews ADD COLUMN approved INTEGER NOT NULL DEFAULT 0"},
+	}
+
+	for _, c := range columns {
+		var count int
+
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('pr_reviews') WHERE name = ?`, c.name,
+		).Scan(&count); err != nil {
+			return fmt.Errorf("checking pr_reviews.%s: %w", c.name, err)
+		}
+
+		if count > 0 {
+			continue
+		}
+
+		if _, err := db.Exec(c.ddl); err != nil {
+			return fmt.Errorf("adding pr_reviews.%s: %w", c.name, err)
+		}
+	}
+
+	return nil
 }
 
 // Close releases the database handle.
@@ -260,12 +299,13 @@ func (s *Store) PendingCount(ctx context.Context) (int, error) {
 // as the zero value, which means "no cycle used yet".
 func (s *Store) PRState(ctx context.Context, prKey string) (PRState, error) {
 	var (
-		st     PRState
-		notice int
+		st       PRState
+		notice   int
+		approved int
 	)
 
 	row := s.db.QueryRowContext(ctx, `
-		SELECT cycle, last_reviewed_sha, summary_comment_id, summary_cycle, budget_notice_posted
+		SELECT cycle, last_reviewed_sha, summary_comment_id, summary_cycle, budget_notice_posted, approved
 		FROM pr_reviews WHERE pr_key = ?`, prKey)
 
 	switch err := row.Scan(
@@ -274,6 +314,7 @@ func (s *Store) PRState(ctx context.Context, prKey string) (PRState, error) {
 		&st.SummaryCommentID,
 		&st.SummaryCycle,
 		&notice,
+		&approved,
 	); {
 	case errors.Is(err, sql.ErrNoRows):
 		return PRState{}, nil
@@ -282,6 +323,7 @@ func (s *Store) PRState(ctx context.Context, prKey string) (PRState, error) {
 	}
 
 	st.BudgetNoticePosted = notice != 0
+	st.Approved = approved != 0
 
 	return st, nil
 }
@@ -293,17 +335,23 @@ func (s *Store) SavePRState(ctx context.Context, prKey string, st PRState) error
 		notice = 1
 	}
 
+	approved := 0
+	if st.Approved {
+		approved = 1
+	}
+
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO pr_reviews
 		    (pr_key, cycle, last_reviewed_sha, summary_comment_id, summary_cycle,
-		     budget_notice_posted, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		     budget_notice_posted, approved, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(pr_key) DO UPDATE SET
 		    cycle = excluded.cycle,
 		    last_reviewed_sha = excluded.last_reviewed_sha,
 		    summary_comment_id = excluded.summary_comment_id,
 		    summary_cycle = excluded.summary_cycle,
 		    budget_notice_posted = excluded.budget_notice_posted,
+		    approved = excluded.approved,
 		    updated_at = excluded.updated_at`,
 		prKey,
 		st.Cycle,
@@ -311,6 +359,7 @@ func (s *Store) SavePRState(ctx context.Context, prKey string, st PRState) error
 		st.SummaryCommentID,
 		st.SummaryCycle,
 		notice,
+		approved,
 		now(),
 	); err != nil {
 		return fmt.Errorf("saving pr state %q: %w", prKey, err)
