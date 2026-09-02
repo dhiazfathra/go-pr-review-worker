@@ -35,6 +35,12 @@ type Config struct {
 	MaxComments int
 	// AnnounceBudgetExhausted posts a one-time note when a third push arrives.
 	AnnounceBudgetExhausted bool
+	// VerifyReplies re-checks the worker's own open threads against the new
+	// commits and the author's replies before reviewing anything new.
+	VerifyReplies bool
+	// ApproveWhenResolved allows an approving review once every thread the
+	// worker opened is resolved and the latest pass found nothing new.
+	ApproveWhenResolved bool
 }
 
 // Worker runs review jobs one at a time, in FIFO order, forever.
@@ -210,10 +216,6 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 		return err
 	}
 
-	if state.Cycle >= w.cfg.MaxCycles {
-		return w.handleExhausted(ctx, job, prov, state, log)
-	}
-
 	if state.LastReviewedSHA == job.HeadSHA {
 		log.Info("head already reviewed, skipping")
 
@@ -223,6 +225,34 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 	pr, err := prov.PullRequest(ctx, job.Repo, job.PRNumber)
 	if err != nil {
 		return err
+	}
+
+	// Answering the author about findings already reported comes first, and
+	// happens whether or not a review cycle is left: once the budget is spent
+	// the follow-up is the only thing the worker still owes the pull request.
+	verified, err := w.verify(ctx, job, prov, state, pr, log)
+	if err != nil {
+		return err
+	}
+
+	if state.Cycle >= w.cfg.MaxCycles {
+		approved, err := w.approve(ctx, job, prov, state, verified, 0, log)
+		if err != nil {
+			return err
+		}
+
+		if verified.Ran {
+			// The follow-up is this pass's whole contribution; recording the
+			// head keeps the next push from re-verifying the same threads.
+			state.LastReviewedSHA = job.HeadSHA
+			state.Approved = state.Approved || approved
+
+			if err := w.store.SavePRState(ctx, prKey, state); err != nil {
+				return err
+			}
+		}
+
+		return w.handleExhausted(ctx, job, prov, state, log)
 	}
 
 	cycle := state.Cycle + 1
@@ -275,6 +305,13 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 
 	state.Cycle = cycle
 	state.LastReviewedSHA = job.HeadSHA
+
+	approved, err := w.approve(ctx, job, prov, state, verified, len(posted)+len(unposted), log)
+	if err != nil {
+		return err
+	}
+
+	state.Approved = state.Approved || approved
 
 	if err := w.store.SavePRState(ctx, prKey, state); err != nil {
 		return err

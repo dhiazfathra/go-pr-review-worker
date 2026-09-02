@@ -29,11 +29,15 @@ type fakeProvider struct {
 	compareErr  error
 	inlineErr   error
 
+	openPRs   []provider.OpenPullRequest
+	openPRErr error
+
 	inline         []provider.InlineComment
 	summaries      []string
 	updates        []string
 	compareCalls   [][2]string
 	fullDiffCalls  int
+	listCalls      int
 	postSummaryErr error
 }
 
@@ -41,6 +45,19 @@ func (f *fakeProvider) Name() string { return "github" }
 
 func (f *fakeProvider) PullRequest(context.Context, string, int) (provider.PullRequest, error) {
 	return f.pr, nil
+}
+
+func (f *fakeProvider) ListOpenPullRequests(context.Context, string) ([]provider.OpenPullRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.listCalls++
+
+	if f.openPRErr != nil {
+		return nil, f.openPRErr
+	}
+
+	return f.openPRs, nil
 }
 
 func (f *fakeProvider) Diff(context.Context, string, int) (string, error) {

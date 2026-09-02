@@ -87,6 +87,7 @@ func TestCLIEngineCarriesTheTimeout(t *testing.T) {
 		"claude",
 		"claude",
 		[]string{"--print"},
+		"claude-sonnet-5",
 		config.Config{EngineTimeout: 3 * time.Minute, MaxFindings: 9},
 		slog.Default(),
 	)

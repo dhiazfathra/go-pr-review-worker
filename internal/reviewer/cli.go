@@ -56,14 +56,25 @@ var childEnvAllowlist = []string{
 	"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL",
 }
 
-// childEnv builds a minimal environment for the engine subprocess.
-func childEnv() []string {
+// childEnv builds a minimal environment for the engine subprocess. model,
+// when non-empty, overrides any inherited ANTHROPIC_MODEL so a subscription
+// CLI's own persisted settings (which HOME/XDG_CONFIG_HOME let it read) can
+// never silently pick a retired model id.
+func childEnv(model string) []string {
 	env := []string{"CI=1"}
 
 	for _, k := range childEnvAllowlist {
+		if k == "ANTHROPIC_MODEL" && model != "" {
+			continue
+		}
+
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
+	}
+
+	if model != "" {
+		env = append(env, "ANTHROPIC_MODEL="+model)
 	}
 
 	return env
@@ -86,7 +97,15 @@ type CLI struct {
 	// MaxOutputBytes caps captured output so a runaway CLI cannot exhaust RAM
 	// on a 2 vCPU / 4 GB box.
 	MaxOutputBytes int64
-	Logger         *slog.Logger
+	// Model, if set, is forced into the child's ANTHROPIC_MODEL, overriding
+	// whatever the invoking shell or the CLI's own persisted user settings
+	// would otherwise pick. Without this, a stale model alias in the
+	// operator's ~/.claude/settings.json silently reaches the subprocess
+	// (HOME is allowlisted for the CLI's own config/credentials) and a
+	// retired dated model id dead-letters every job with a 404 — see
+	// docs/incidents/2026-09-02-manual-run-stale-model-alias.md.
+	Model  string
+	Logger *slog.Logger
 }
 
 // Name implements Engine.
@@ -124,6 +143,36 @@ func (c CLI) Review(ctx context.Context, req Request) (Result, error) {
 	return res, nil
 }
 
+// Verify implements Verifier: it re-runs the CLI with the follow-up contract
+// and parses the per-thread verdicts.
+func (c CLI) Verify(ctx context.Context, req VerifyRequest) (VerifyResult, error) {
+	if len(req.Threads) == 0 {
+		return VerifyResult{}, nil
+	}
+
+	stdout, stderr, err := c.run(ctx, buildVerifyPrompt(req))
+	combined := stdout + "\n" + stderr
+
+	if err != nil {
+		if rateLimitSignals.MatchString(combined) {
+			return VerifyResult{}, fmt.Errorf("%s: %w: %s", c.EngineName, ErrRateLimited, firstLine(combined))
+		}
+
+		return VerifyResult{}, fmt.Errorf("%s verify invocation: %w: %s", c.EngineName, err, firstLine(combined))
+	}
+
+	if rateLimitSignals.MatchString(combined) && !strings.Contains(stdout, `"verdicts"`) {
+		return VerifyResult{}, fmt.Errorf("%s: %w: %s", c.EngineName, ErrRateLimited, firstLine(combined))
+	}
+
+	res, err := parseVerifyResult(stdout, req.Threads)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("%s verify output: %w", c.EngineName, err)
+	}
+
+	return res, nil
+}
+
 // run spawns the CLI in its own process group and returns its output. On
 // timeout the whole group is killed, so a CLI that spawned children (a shell,
 // a language server) cannot leak processes onto a small VM.
@@ -141,7 +190,7 @@ func (c CLI) run(ctx context.Context, prompt string) (string, string, error) {
 	cmd := exec.Command(c.Binary, c.Args...) // nosemgrep: dangerous-exec-command -- Binary/Args come from operator-set PRW_*_BIN/PRW_*_ARGS config (internal/config), never from PR/webhook content
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = childEnv()
+	cmd.Env = childEnv(c.Model)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &stdout, remaining: c.MaxOutputBytes}

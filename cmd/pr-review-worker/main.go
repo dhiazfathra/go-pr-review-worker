@@ -57,8 +57,8 @@ func run() error {
 	}
 
 	engine := reviewer.Chain{Engines: []reviewer.Engine{
-		cliEngine("claude", cfg.ClaudeBinary, cfg.ClaudeArgs, cfg, log),
-		cliEngine("opencode", cfg.OpencodeBin, cfg.OpencodeArgs, cfg, log),
+		cliEngine("claude", cfg.ClaudeBinary, cfg.ClaudeArgs, cfg.ClaudeModel, cfg, log),
+		cliEngine("opencode", cfg.OpencodeBin, cfg.OpencodeArgs, "", cfg, log),
 	}}
 
 	w := worker.New(st, engine, providers, notify, worker.Config{
@@ -69,7 +69,11 @@ func run() error {
 		MinSeverity:             cfg.MinSeverity,
 		MaxComments:             cfg.MaxComments,
 		AnnounceBudgetExhausted: cfg.AnnounceBudgetExhausted,
+		VerifyReplies:           cfg.VerifyReplies,
+		ApproveWhenResolved:     cfg.ApproveWhenResolved,
 	}, log)
+
+	watcher := worker.NewWatcher(st, providers, watchTargets(cfg), notify, cfg.WatchInterval, log)
 
 	handler := &webhook.Handler{
 		Store:        st,
@@ -102,6 +106,8 @@ func run() error {
 		w.Run(ctx)
 	}()
 
+	go watcher.Run(ctx)
+
 	go func() {
 		<-ctx.Done()
 
@@ -131,6 +137,17 @@ func run() error {
 	return nil
 }
 
+// watchTargets translates the configured repositories into the worker's own
+// type, so the worker package does not depend on config.
+func watchTargets(cfg config.Config) []worker.WatchTarget {
+	targets := make([]worker.WatchTarget, 0, len(cfg.WatchRepos))
+	for _, r := range cfg.WatchRepos {
+		targets = append(targets, worker.WatchTarget{Provider: r.Provider, Repo: r.Repo})
+	}
+
+	return targets
+}
+
 func providerNames(providers map[string]provider.Provider) []string {
 	names := make([]string, 0, len(providers))
 	for name := range providers {
@@ -143,6 +160,7 @@ func providerNames(providers map[string]provider.Provider) []string {
 func cliEngine(
 	name, binary string,
 	args []string,
+	model string,
 	cfg config.Config,
 	log *slog.Logger,
 ) reviewer.Engine {
@@ -150,6 +168,7 @@ func cliEngine(
 		EngineName:     name,
 		Binary:         binary,
 		Args:           args,
+		Model:          model,
 		Timeout:        cfg.EngineTimeout,
 		MaxFindings:    cfg.MaxFindings,
 		MaxOutputBytes: 4 << 20,

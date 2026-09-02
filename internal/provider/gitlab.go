@@ -83,6 +83,62 @@ func (g *GitLab) mergeRequest(ctx context.Context, repo string, iid int) (gitlab
 	return mr, nil
 }
 
+// ListOpenPullRequests implements Provider.
+func (g *GitLab) ListOpenPullRequests(ctx context.Context, repo string) ([]OpenPullRequest, error) {
+	var out []OpenPullRequest
+
+	for page := 1; page <= maxListPages; page++ {
+		raw, err := g.c.do(
+			ctx,
+			"GET",
+			fmt.Sprintf(
+				"/projects/%s/merge_requests?state=opened&per_page=100&page=%d",
+				project(repo), page,
+			),
+			nil,
+			gitlabHeaders,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		var payload []struct {
+			IID      int            `json:"iid"`
+			Draft    bool           `json:"draft"`
+			WIP      bool           `json:"work_in_progress"`
+			SHA      string         `json:"sha"`
+			DiffRefs gitlabDiffRefs `json:"diff_refs"`
+		}
+
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return nil, fmt.Errorf("decoding gitlab merge request list: %w", err)
+		}
+
+		for _, mr := range payload {
+			if mr.Draft || mr.WIP {
+				continue
+			}
+
+			head := mr.DiffRefs.HeadSHA
+			if head == "" {
+				head = mr.SHA
+			}
+
+			out = append(out, OpenPullRequest{
+				Number:  mr.IID,
+				HeadSHA: head,
+				BaseSHA: mr.DiffRefs.BaseSHA,
+			})
+		}
+
+		if len(payload) < 100 {
+			break
+		}
+	}
+
+	return out, nil
+}
+
 // PullRequest implements Provider.
 func (g *GitLab) PullRequest(ctx context.Context, repo string, number int) (PullRequest, error) {
 	mr, err := g.mergeRequest(ctx, repo, number)

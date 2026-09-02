@@ -128,6 +128,40 @@ func (c Chain) Review(ctx context.Context, req Request) (Result, error) {
 	return Result{}, errors.Join(errs...)
 }
 
+// Verify implements Verifier with the same fallback rule as Review: move on
+// only when an engine is rate limited. An engine in the chain that cannot
+// verify at all is skipped rather than failing the pass, so pairing a
+// verifying engine with a non-verifying one still works.
+func (c Chain) Verify(ctx context.Context, req VerifyRequest) (VerifyResult, error) {
+	var errs []error
+
+	for _, e := range c.Engines {
+		v, ok := e.(Verifier)
+		if !ok {
+			continue
+		}
+
+		res, err := v.Verify(ctx, req)
+		if err == nil {
+			res.Engine = e.Name()
+
+			return res, nil
+		}
+
+		errs = append(errs, fmt.Errorf("%s: %w", e.Name(), err))
+
+		if !errors.Is(err, ErrRateLimited) {
+			return VerifyResult{}, errors.Join(errs...)
+		}
+	}
+
+	if len(errs) == 0 {
+		return VerifyResult{}, errors.New("no verifying engines configured")
+	}
+
+	return VerifyResult{}, errors.Join(errs...)
+}
+
 // Name implements Engine.
 func (c Chain) Name() string {
 	names := make([]string, 0, len(c.Engines))

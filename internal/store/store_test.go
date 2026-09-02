@@ -2,11 +2,13 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/dhiazfathra/go-pr-review-worker/internal/store"
+	_ "modernc.org/sqlite" // the migration test seeds a pre-migration schema directly
 )
 
 func open(t *testing.T) *store.Store {
@@ -310,5 +312,56 @@ func TestUnseenFingerprintsPreservesInputOrder(t *testing.T) {
 
 	if len(got) != 2 || got[0] != "c" || got[1] != "a" {
 		t.Fatalf("got = %v, want [c a]", got)
+	}
+}
+
+// A database created before the approval feature has no `approved` column, and
+// `CREATE TABLE IF NOT EXISTS` will not add one — without a migration the
+// worker would fail every PRState read on an existing deployment.
+func TestOpenMigratesADatabaseMissingTheApprovedColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+
+	if _, err := old.Exec(`
+		CREATE TABLE pr_reviews (
+		    pr_key               TEXT PRIMARY KEY,
+		    cycle                INTEGER NOT NULL DEFAULT 0,
+		    last_reviewed_sha    TEXT    NOT NULL DEFAULT '',
+		    summary_comment_id   TEXT    NOT NULL DEFAULT '',
+		    summary_cycle        INTEGER NOT NULL DEFAULT 0,
+		    budget_notice_posted INTEGER NOT NULL DEFAULT 0,
+		    updated_at           TEXT    NOT NULL
+		);
+		INSERT INTO pr_reviews (pr_key, cycle, last_reviewed_sha, updated_at)
+		VALUES ('github:o/r#1', 1, 'sha1', '2026-09-02T00:00:00Z');`); err != nil {
+		t.Fatalf("seeding the old schema: %v", err)
+	}
+
+	if err := old.Close(); err != nil {
+		t.Fatalf("closing the old handle: %v", err)
+	}
+
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("Open on a pre-migration database: %v", err)
+	}
+
+	defer func() { _ = st.Close() }()
+
+	got, err := st.PRState(context.Background(), "github:o/r#1")
+	if err != nil {
+		t.Fatalf("PRState after migration: %v", err)
+	}
+
+	if got.Cycle != 1 || got.LastReviewedSHA != "sha1" {
+		t.Fatalf("state = %+v, want the pre-existing row preserved", got)
+	}
+
+	if got.Approved {
+		t.Error("Approved = true on a migrated row; the new column must default to false")
 	}
 }

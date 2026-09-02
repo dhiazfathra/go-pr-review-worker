@@ -28,6 +28,7 @@ type Config struct {
 	GitLabSecret  string
 	ClaudeBinary  string
 	ClaudeArgs    []string
+	ClaudeModel   string
 	OpencodeBin   string
 	OpencodeArgs  []string
 	EngineTimeout time.Duration
@@ -41,6 +42,26 @@ type Config struct {
 	PollInterval            time.Duration
 	AnnounceBudgetExhausted bool
 	LogLevel                string
+
+	// WatchRepos are "provider:owner/name" entries the watcher polls for pushes
+	// a webhook never delivered. Empty disables the watcher entirely.
+	WatchRepos []WatchRepo
+	// WatchInterval is how often the watcher re-lists open pull requests.
+	WatchInterval time.Duration
+
+	// VerifyReplies turns on the follow-up pass: re-checking the worker's own
+	// unresolved threads against the new commits and the author's replies.
+	VerifyReplies bool
+	// ApproveWhenResolved lets the worker submit an APPROVE review once every
+	// thread it opened is resolved. Off by default: approving is an act with
+	// merge consequences, so it stays an explicit operator decision.
+	ApproveWhenResolved bool
+}
+
+// WatchRepo is one repository the watcher polls.
+type WatchRepo struct {
+	Provider string
+	Repo     string
 }
 
 // Load reads the environment and applies defaults. It fails when no provider
@@ -56,6 +77,7 @@ func Load() (Config, error) {
 		GitLabAPI:               env("PRW_GITLAB_API", "https://gitlab.com/api/v4"),
 		GitLabSecret:            os.Getenv("PRW_GITLAB_WEBHOOK_SECRET"),
 		ClaudeBinary:            env("PRW_CLAUDE_BIN", "claude"),
+		ClaudeModel:             os.Getenv("PRW_CLAUDE_MODEL"),
 		ClaudeArgs:              fields("PRW_CLAUDE_ARGS", "--print --output-format text"),
 		OpencodeBin:             env("PRW_OPENCODE_BIN", "opencode"),
 		OpencodeArgs:            fields("PRW_OPENCODE_ARGS", "run"),
@@ -69,7 +91,17 @@ func Load() (Config, error) {
 		PollInterval:            duration("PRW_POLL_INTERVAL", 30*time.Second),
 		AnnounceBudgetExhausted: boolean("PRW_ANNOUNCE_BUDGET_EXHAUSTED", true),
 		LogLevel:                env("PRW_LOG_LEVEL", "info"),
+		WatchInterval:           duration("PRW_WATCH_INTERVAL", 2*time.Minute),
+		VerifyReplies:           boolean("PRW_VERIFY_REPLIES", true),
+		ApproveWhenResolved:     boolean("PRW_APPROVE_WHEN_RESOLVED", false),
 	}
+
+	watched, err := watchRepos(os.Getenv("PRW_WATCH_REPOS"))
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.WatchRepos = watched
 
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
@@ -113,9 +145,26 @@ func (c Config) validate() error {
 		"PRW_ENGINE_TIMEOUT": c.EngineTimeout,
 		"PRW_RETRY_DELAY":    c.RetryDelay,
 		"PRW_POLL_INTERVAL":  c.PollInterval,
+		"PRW_WATCH_INTERVAL": c.WatchInterval,
 	} {
 		if v <= 0 {
 			return fmt.Errorf("%s must be positive, got %s", name, v)
+		}
+	}
+
+	// Watching a forge whose credentials are missing would poll forever and
+	// fail every time; that is a startup misconfiguration, not a runtime event.
+	for _, wr := range c.WatchRepos {
+		if wr.Provider == "github" && !c.GitHubEnabled() {
+			return fmt.Errorf(
+				"PRW_WATCH_REPOS watches github:%s but GitHub is not configured "+
+					"(needs PRW_GITHUB_TOKEN + PRW_GITHUB_WEBHOOK_SECRET)", wr.Repo)
+		}
+
+		if wr.Provider == "gitlab" && !c.GitLabEnabled() {
+			return fmt.Errorf(
+				"PRW_WATCH_REPOS watches gitlab:%s but GitLab is not configured "+
+					"(needs PRW_GITLAB_TOKEN + PRW_GITLAB_WEBHOOK_SECRET)", wr.Repo)
 		}
 	}
 
@@ -126,6 +175,49 @@ func (c Config) validate() error {
 	}
 
 	return nil
+}
+
+// watchRepos parses PRW_WATCH_REPOS: a comma- or space-separated list of
+// "provider:owner/name" entries. The provider prefix is required rather than
+// inferred, because the same "owner/name" is a valid path on both forges and
+// guessing would poll the wrong API with the wrong token.
+func watchRepos(raw string) ([]WatchRepo, error) {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+
+	out := make([]WatchRepo, 0, len(fields))
+	seen := make(map[string]bool, len(fields))
+
+	for _, f := range fields {
+		provider, repo, ok := strings.Cut(f, ":")
+		if !ok {
+			return nil, fmt.Errorf(
+				"PRW_WATCH_REPOS entry %q must be \"provider:owner/name\", e.g. github:octocat/hello", f)
+		}
+
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		repo = strings.Trim(strings.TrimSpace(repo), "/")
+
+		if provider != "github" && provider != "gitlab" {
+			return nil, fmt.Errorf("PRW_WATCH_REPOS entry %q: provider must be github or gitlab", f)
+		}
+
+		if repo == "" || !strings.Contains(repo, "/") {
+			return nil, fmt.Errorf("PRW_WATCH_REPOS entry %q: repository must be owner/name", f)
+		}
+
+		key := provider + ":" + repo
+		if seen[key] {
+			continue
+		}
+
+		seen[key] = true
+
+		out = append(out, WatchRepo{Provider: provider, Repo: repo})
+	}
+
+	return out, nil
 }
 
 // requireSecureURL rejects a forge API endpoint that would send an

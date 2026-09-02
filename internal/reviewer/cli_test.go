@@ -91,6 +91,27 @@ echo "{\"summary\":\"$(env | sort | tr '\n' ';')\",\"findings\":[]}"`, 10*time.S
 	}
 }
 
+func TestCLIModelOverridesInheritedAnthropicModel(t *testing.T) {
+	t.Setenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-20250219")
+
+	engine := newCLI(t, `cat >/dev/null
+echo "{\"summary\":\"$(env | sort | tr '\n' ';')\",\"findings\":[]}"`, 10*time.Second)
+	engine.Model = "claude-sonnet-5"
+
+	res, err := engine.Review(context.Background(), Request{Repo: "r", PRNumber: 1, Diff: "d"})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+
+	if !strings.Contains(res.Summary, "ANTHROPIC_MODEL=claude-sonnet-5") {
+		t.Error("Model did not override the inherited ANTHROPIC_MODEL")
+	}
+
+	if strings.Contains(res.Summary, "claude-3-7-sonnet-20250219") {
+		t.Error("the retired model id from the shell leaked through instead of being overridden")
+	}
+}
+
 func TestCLIDetectsRateLimitSignals(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -259,5 +280,104 @@ func TestFirstLineTruncates(t *testing.T) {
 
 	if got := firstLine(strings.Repeat("x", 500)); len(got) != 300 {
 		t.Fatalf("len = %d, want 300", len(got))
+	}
+}
+
+func verifyRequest() VerifyRequest {
+	return VerifyRequest{
+		Repo:     "o/r",
+		PRNumber: 7,
+		Title:    "Add trace id",
+		Diff:     "@@ delta @@",
+		Threads:  []OpenThread{{ID: "T1", File: "a.ts", Line: 30, Finding: "bug", Replies: []string{"dev: fixed"}}},
+	}
+}
+
+func TestCLIVerifyParsesVerdicts(t *testing.T) {
+	script := `cat >/dev/null
+echo '{"verdicts":[{"id":"T1","verdict":"fixed","note":"looks right"}]}'`
+
+	res, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(res.Verdicts) != 1 || res.Verdicts[0].Verdict != VerdictFixed {
+		t.Fatalf("verdicts = %+v", res.Verdicts)
+	}
+}
+
+// The prompt goes on stdin for Verify exactly as it does for Review, so a large
+// diff never hits ARG_MAX.
+func TestCLIVerifySeesThePromptOnStdin(t *testing.T) {
+	script := `input=$(cat)
+case "$input" in
+  *"thread id: T1"*) echo '{"verdicts":[{"id":"T1","verdict":"fixed","note":"n"}]}' ;;
+  *) echo '{"verdicts":[]}' ;;
+esac`
+
+	res, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(res.Verdicts) != 1 {
+		t.Fatal("the verify prompt did not reach the engine on stdin")
+	}
+}
+
+func TestCLIVerifyWithNoThreadsDoesNotRunTheEngine(t *testing.T) {
+	// A stub that would fail loudly if it ever ran.
+	res, err := newCLI(t, "exit 1", 10*time.Second).Verify(context.Background(), VerifyRequest{})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(res.Verdicts) != 0 {
+		t.Fatalf("verdicts = %+v, want none", res.Verdicts)
+	}
+}
+
+func TestCLIVerifyDetectsRateLimiting(t *testing.T) {
+	script := `cat >/dev/null
+echo "Claude usage limit reached" >&2
+exit 1`
+
+	_, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited so the chain falls back", err)
+	}
+}
+
+func TestCLIVerifyRateLimitTextWithVerdictsIsNotAFallback(t *testing.T) {
+	script := `cat >/dev/null
+echo '{"verdicts":[{"id":"T1","verdict":"unfixed","note":"the rate limit handling is still wrong"}]}'`
+
+	res, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(res.Verdicts) != 1 {
+		t.Fatal("a verdict discussing rate limiting was misread as the engine being rate limited")
+	}
+}
+
+func TestCLIVerifyUnparsableOutput(t *testing.T) {
+	_, err := newCLI(t, "cat >/dev/null\necho not json", 10*time.Second).
+		Verify(context.Background(), verifyRequest())
+	if err == nil {
+		t.Fatal("err = nil, want a failure on output carrying no JSON")
+	}
+}
+
+func TestCLIVerifyFailureCarriesTheEngineOutput(t *testing.T) {
+	script := `cat >/dev/null
+echo "engine exploded" >&2
+exit 3`
+
+	_, err := newCLI(t, script, 10*time.Second).Verify(context.Background(), verifyRequest())
+	if err == nil || !strings.Contains(err.Error(), "engine exploded") {
+		t.Fatalf("err = %v, want the engine's message for diagnosis", err)
 	}
 }

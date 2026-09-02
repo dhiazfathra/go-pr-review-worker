@@ -28,11 +28,43 @@ type InlineComment struct {
 	Body string
 }
 
+// OpenPullRequest is the minimum the watcher needs to decide whether a pull
+// request has moved on since its last review.
+type OpenPullRequest struct {
+	Number  int
+	HeadSHA string
+	BaseSHA string
+}
+
+// ThreadComment is one comment in a review thread, in posting order.
+type ThreadComment struct {
+	// ID is the provider id of the comment, used to reply into the thread.
+	ID string
+	// Author is the login that wrote it, so the worker can tell its own
+	// findings apart from the author's replies.
+	Author string
+	Body   string
+}
+
+// ReviewThread is one inline conversation on a pull request.
+type ReviewThread struct {
+	// ID is the provider handle used to resolve the thread. On GitHub this is
+	// a GraphQL node id, which is why resolving is not a REST call.
+	ID       string
+	Path     string
+	Line     int
+	Resolved bool
+	Comments []ThreadComment
+}
+
 // Provider is a forge the worker can read diffs from and post reviews to.
 type Provider interface {
 	Name() string
 	// PullRequest fetches PR metadata.
 	PullRequest(ctx context.Context, repo string, number int) (PullRequest, error)
+	// ListOpenPullRequests returns every open pull request, for the watcher to
+	// compare against what has already been reviewed.
+	ListOpenPullRequests(ctx context.Context, repo string) ([]OpenPullRequest, error)
 	// Diff returns the unified diff of the whole PR.
 	Diff(ctx context.Context, repo string, number int) (string, error)
 	// CompareDiff returns the unified diff between two commits, used to scope
@@ -44,6 +76,23 @@ type Provider interface {
 	PostSummary(ctx context.Context, repo string, number int, body string) (string, error)
 	// UpdateSummary edits a previously posted summary comment in place.
 	UpdateSummary(ctx context.Context, repo, commentID, body string) error
+}
+
+// ThreadReviewer is the optional capability the follow-up pass needs: reading
+// the worker's own threads, answering them, resolving them, and approving.
+// It is separate from Provider because resolving a thread has no REST
+// equivalent on GitHub and no equivalent at all on some forges — a provider
+// that cannot do it should fail to satisfy the interface rather than return
+// "unsupported" from four methods.
+type ThreadReviewer interface {
+	// ReviewThreads lists the pull request's inline conversations.
+	ReviewThreads(ctx context.Context, repo string, number int) ([]ReviewThread, error)
+	// ReplyToThread appends a comment to the thread that inReplyTo belongs to.
+	ReplyToThread(ctx context.Context, repo string, number int, inReplyTo, body string) error
+	// ResolveThread marks a thread resolved.
+	ResolveThread(ctx context.Context, threadID string) error
+	// Approve submits an approving review on the pull request.
+	Approve(ctx context.Context, repo string, number int, body string) error
 }
 
 // httpClient is the shared transport. One client, reused, keeps idle memory flat.

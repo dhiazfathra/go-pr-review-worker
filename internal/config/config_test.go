@@ -22,6 +22,8 @@ var prwVars = []string{
 	"PRW_MAX_FINDINGS", "PRW_MIN_SEVERITY", "PRW_RETRY_DELAY", "PRW_POLL_INTERVAL",
 	"PRW_ANNOUNCE_BUDGET_EXHAUSTED", "PRW_LOG_LEVEL",
 	"PRW_ALLOW_INSECURE_LOOPBACK",
+	"PRW_CLAUDE_MODEL", "PRW_WATCH_REPOS", "PRW_WATCH_INTERVAL",
+	"PRW_VERIFY_REPLIES", "PRW_APPROVE_WHEN_RESOLVED",
 }
 
 func clearEnv(t *testing.T) {
@@ -204,5 +206,85 @@ func TestForgeAPIEndpointMustNotExposeTheToken(t *testing.T) {
 				t.Fatalf("PRW_GITHUB_API=%q rejected: %v", c.api, err)
 			}
 		})
+	}
+}
+
+func TestWatchReposParsesProviderPrefixedEntries(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("PRW_GITHUB_TOKEN", "t")
+	t.Setenv("PRW_GITHUB_WEBHOOK_SECRET", "s")
+	t.Setenv("PRW_WATCH_REPOS", "github:octocat/hello, github:octocat/hello ,github:o/two")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if len(cfg.WatchRepos) != 2 {
+		t.Fatalf("WatchRepos = %+v, want the duplicate collapsed", cfg.WatchRepos)
+	}
+
+	if cfg.WatchRepos[0] != (config.WatchRepo{Provider: "github", Repo: "octocat/hello"}) {
+		t.Errorf("WatchRepos[0] = %+v", cfg.WatchRepos[0])
+	}
+}
+
+func TestWatchReposRejectsMalformedEntries(t *testing.T) {
+	for _, raw := range []string{
+		"octocat/hello",       // no provider prefix
+		"bitbucket:o/r",       // unknown provider
+		"github:justtheowner", // not owner/name
+	} {
+		t.Run(raw, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("PRW_GITHUB_TOKEN", "t")
+			t.Setenv("PRW_GITHUB_WEBHOOK_SECRET", "s")
+			t.Setenv("PRW_WATCH_REPOS", raw)
+
+			if _, err := config.Load(); err == nil {
+				t.Fatalf("Load() accepted %q; a typo here means the worker polls nothing and says nothing", raw)
+			}
+		})
+	}
+}
+
+// Watching a forge with no credentials could only ever fail on every poll, so
+// it is refused at startup rather than logged forever.
+func TestWatchReposRequiresTheForgeToBeConfigured(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("PRW_GITHUB_TOKEN", "t")
+	t.Setenv("PRW_GITHUB_WEBHOOK_SECRET", "s")
+	t.Setenv("PRW_WATCH_REPOS", "gitlab:group/project")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() accepted a gitlab watch target with no gitlab credentials")
+	}
+
+	if !strings.Contains(err.Error(), "GitLab is not configured") {
+		t.Errorf("error = %v, want it to name the missing credentials", err)
+	}
+}
+
+func TestVerifyDefaultsOnAndApprovalDefaultsOff(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("PRW_GITHUB_TOKEN", "t")
+	t.Setenv("PRW_GITHUB_WEBHOOK_SECRET", "s")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if !cfg.VerifyReplies {
+		t.Error("VerifyReplies defaults off; answering the author should not need opting in")
+	}
+
+	if cfg.ApproveWhenResolved {
+		t.Error("ApproveWhenResolved defaults on; approving has merge consequences and must be opt-in")
+	}
+
+	if cfg.WatchInterval != 2*time.Minute {
+		t.Errorf("WatchInterval = %s, want 2m", cfg.WatchInterval)
 	}
 }
