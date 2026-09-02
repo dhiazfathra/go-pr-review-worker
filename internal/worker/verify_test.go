@@ -450,6 +450,48 @@ func TestUnresolvableThreadIsNotCountedAsFixed(t *testing.T) {
 	}
 }
 
+// A forge that refuses the approval must not fail the job. The refusal is
+// permanent — the token's account opened the PR, or it cannot review the
+// repository — so retrying it would eventually dead-letter a PR whose findings
+// were posted and whose threads were resolved, and tell the author the review
+// failed when it did not.
+func TestARefusedApprovalLeavesTheJobSuccessful(t *testing.T) {
+	prov := newThreadProvider(workerThread("T1", "a.ts", false, "Fixed"))
+	prov.approveErr = errors.New("422 Can not approve your own pull request")
+
+	engine := &verifyingEngine{
+		scriptedEngine: scriptedEngine{results: []reviewer.Result{{Summary: "pass 2"}}},
+		verdicts:       []reviewer.ThreadVerdict{{ID: "T1", Verdict: reviewer.VerdictFixed}},
+	}
+
+	st, w := verifyFixture(t, worker.Config{
+		VerifyReplies:       true,
+		ApproveWhenResolved: true,
+	}, engine, prov)
+
+	// runJob drains the queue or fails the test, so reaching the assertions at
+	// all is the proof that the refusal did not put the job into retry.
+	runJob(t, st, w)
+
+	resolved, _, approvals := prov.snapshot()
+	if len(resolved) != 1 {
+		t.Errorf("resolved %v, want the thread resolved despite the refused approval", resolved)
+	}
+
+	if len(approvals) != 0 {
+		t.Errorf("recorded an approval the forge refused: %v", approvals)
+	}
+
+	state, err := st.PRState(context.Background(), "github:o/r#7")
+	if err != nil {
+		t.Fatalf("PRState: %v", err)
+	}
+
+	if state.Approved {
+		t.Error("PR marked approved after the forge refused the approval")
+	}
+}
+
 // The follow-up is what the worker still owes a PR whose review budget is
 // spent; refusing to run it there would strand every thread on a busy PR.
 func TestVerifyStillRunsAfterTheReviewBudgetIsSpent(t *testing.T) {

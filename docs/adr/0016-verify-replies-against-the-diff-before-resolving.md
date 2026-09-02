@@ -74,6 +74,17 @@ consequence of upgrading it. `pr_reviews.approved` makes it once-only.
 Approval is withheld when the same pass posted a new finding — approving and
 objecting in one breath is incoherent — and when any thread is still open.
 
+A **refused** approval is logged and the pull request left unapproved; it does
+not fail the job. The forge refuses for reasons that are permanent and none of
+them mean the review went wrong: `422 Can not approve your own pull request`
+when the token's account opened the pull request, `403` when it cannot review
+the repository. Returning an error there retried a call that could never
+succeed and then dead-lettered a pull request whose findings were posted and
+whose threads were resolved — telling the author the review failed when it had
+not. Found by
+[evidence 0002](../evidence/0002-watcher-and-reply-verification/a-refused-approval-does-not-fail-the-job.md),
+which is also why `approve` returns a plain `bool`.
+
 ### Provider capability
 
 Resolving a thread on GitHub has no REST equivalent; it is a GraphQL mutation
@@ -127,7 +138,8 @@ clients themselves).
   GraphQL query. Both are skipped entirely when there is nothing open.
 - The worker can now write to a pull request in three new ways (reply, resolve,
   approve), so its token needs `pull_requests: write`, and approval needs the
-  account to be permitted to review the repository. A token that cannot approve
-  fails that call only; the resolves still stand.
+  account to be permitted to review the repository, and not to be the pull
+  request's author. A token that cannot approve loses that call only: the
+  comments, replies and resolves still stand and the job still succeeds.
 - GitLab gets the watcher but not the follow-up pass until an equivalent
   discussions adapter exists.

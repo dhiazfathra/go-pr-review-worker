@@ -240,6 +240,15 @@ func engineName(engine string) string {
 // resolved and this pass added nothing new. It is the last step of a follow-up
 // pass, never of a first review: approving a PR the worker has just commented
 // on for the first time would contradict its own findings.
+//
+// A rejected approval is reported, not returned as an error. The forge refuses
+// one for reasons that are permanent and none of them mean the review went
+// wrong: a token whose account opened the pull request gets
+// `422 Can not approve your own pull request`, and one without review
+// permission gets `403`. Failing the job there would retry a call that can
+// never succeed and then dead-letter a pull request whose findings were posted
+// and whose threads were resolved, telling the author the review failed when it
+// did not.
 func (w *Worker) approve(
 	ctx context.Context,
 	job store.Job,
@@ -248,17 +257,17 @@ func (w *Worker) approve(
 	out verifyOutcome,
 	newFindings int,
 	log *slog.Logger,
-) (bool, error) {
+) bool {
 	switch {
 	case !w.cfg.ApproveWhenResolved, !out.Ran, state.Approved:
-		return false, nil
+		return false
 	case out.Open > 0 || newFindings > 0:
-		return false, nil
+		return false
 	}
 
 	tr, ok := prov.(provider.ThreadReviewer)
 	if !ok {
-		return false, nil
+		return false
 	}
 
 	body := fmt.Sprintf(
@@ -268,10 +277,12 @@ func (w *Worker) approve(
 	)
 
 	if err := tr.Approve(ctx, job.Repo, job.PRNumber, body); err != nil {
-		return false, fmt.Errorf("approving pull request: %w", err)
+		log.Warn("approving pull request failed, leaving it unapproved", "error", err)
+
+		return false
 	}
 
 	log.Info("pull request approved", "resolved", out.Resolved)
 
-	return true, nil
+	return true
 }

@@ -8,7 +8,7 @@ Accepted (2026-09-01)
 
 The primary engine is the Claude Code CLI. When its quota is exhausted the job
 must automatically retry on OpenCode with no human in the loop. "Detect rate
-limited" needs a precise definition, because falling back on *any* failure would
+limited" needs a precise definition, because falling back on _any_ failure would
 burn the second engine's quota on failures that are not quota-related (a
 malformed prompt, a missing binary, an unparsable diff) — those fail identically
 on both engines.

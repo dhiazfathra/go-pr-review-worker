@@ -31,7 +31,7 @@ Go, one static binary, `cmd/pr-review-worker`.
   rewrite rather than a port; compile times slow the review-fix loop this
   project itself depends on.
 - Rejected: the memory advantage is real but small at this scale. The worker's
-  resident set is dominated by the *child* CLI (hundreds of MB for Node-based
+  resident set is dominated by the _child_ CLI (hundreds of MB for Node-based
   agentic CLIs), not by the supervisor. Trading a working architecture for
   ~10 MB of RSS is a bad exchange.
 

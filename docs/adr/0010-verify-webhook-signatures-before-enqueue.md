@@ -12,7 +12,7 @@ repository it has a token for, and fill the queue.
 
 ## Decision
 
-`internal/webhook` reads the body under a 2 MB limit, then verifies *before*
+`internal/webhook` reads the body under a 2 MB limit, then verifies _before_
 parsing or enqueueing:
 
 - **GitHub**: HMAC-SHA256 over the raw body, compared against

@@ -236,10 +236,7 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 	}
 
 	if state.Cycle >= w.cfg.MaxCycles {
-		approved, err := w.approve(ctx, job, prov, state, verified, 0, log)
-		if err != nil {
-			return err
-		}
+		approved := w.approve(ctx, job, prov, state, verified, 0, log)
 
 		if verified.Ran {
 			// The follow-up is this pass's whole contribution; recording the
@@ -306,10 +303,7 @@ func (w *Worker) review(ctx context.Context, job store.Job, log *slog.Logger) er
 	state.Cycle = cycle
 	state.LastReviewedSHA = job.HeadSHA
 
-	approved, err := w.approve(ctx, job, prov, state, verified, len(posted)+len(unposted), log)
-	if err != nil {
-		return err
-	}
+	approved := w.approve(ctx, job, prov, state, verified, len(posted)+len(unposted), log)
 
 	state.Approved = state.Approved || approved
 

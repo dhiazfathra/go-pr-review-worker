@@ -253,6 +253,11 @@ This is **off by default**: an approval can satisfy branch protection and
 unblock a merge, so it stays an explicit decision. It happens at most once per
 pull request.
 
+The token's account must be allowed to review the repository and must not be
+the pull request's author — GitHub answers
+`422 Can not approve your own pull request`. A refused approval is logged and
+the pull request is left unapproved; the review itself still succeeds.
+
 Resolving a thread is a GitHub GraphQL mutation with no REST equivalent, so
 this pass runs on **GitHub only**; on GitLab the worker logs that it is skipped
 and reviews as before. See

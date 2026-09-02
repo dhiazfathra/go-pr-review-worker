@@ -17,7 +17,7 @@ comments and concludes the code is clean.
   (default 3) a failure sets the job back to `failed`, which `ClaimNext` treats
   as runnable, after a fixed `PRW_RETRY_DELAY` (default 30s).
 - At the limit the job becomes `dead` and the worker posts one comment on the PR:
-  *"Automated review failed after N attempts"*, with the error text.
+  _"Automated review failed after N attempts"_, with the error text.
 - A failed pass never advances `pr_reviews.cycle`, so the budget is not spent on
   a review that did not happen.
 - Dead rows stay in the table as the dead-letter record; `last_error` holds the
